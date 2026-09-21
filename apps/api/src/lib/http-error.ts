@@ -41,4 +41,32 @@ export class HttpError extends Error {
   static internal(message = "Internal server error"): HttpError {
     return new HttpError(500, "INTERNAL_ERROR", message);
   }
+
+  static invalidCredentials(message = "Invalid email or password"): HttpError {
+    return new HttpError(401, "INVALID_CREDENTIALS", message);
+  }
+
+  static sessionExpired(message = "Session has expired"): HttpError {
+    return new HttpError(401, "SESSION_EXPIRED", message);
+  }
+
+  static sessionRevoked(message = "Session has been revoked"): HttpError {
+    return new HttpError(401, "SESSION_REVOKED", message);
+  }
+
+  static invalidRefreshToken(message = "Refresh token is invalid"): HttpError {
+    return new HttpError(401, "INVALID_REFRESH_TOKEN", message);
+  }
+
+  static refreshTokenReused(message = "Refresh token has already been used"): HttpError {
+    return new HttpError(401, "REFRESH_TOKEN_REUSED", message);
+  }
+
+  static rateLimited(message = "Too many requests, please try again later"): HttpError {
+    return new HttpError(429, "RATE_LIMITED", message);
+  }
+
+  static csrfOriginRejected(message = "Request origin is not allowed"): HttpError {
+    return new HttpError(403, "CSRF_ORIGIN_REJECTED", message);
+  }
 }
