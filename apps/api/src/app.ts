@@ -2,6 +2,8 @@ import express, { type Express } from "express";
 import { errorHandler } from "./middleware/error-handler.js";
 import { notFoundHandler } from "./middleware/not-found.js";
 import { requestId } from "./middleware/request-id.js";
+import { requireDb } from "./middleware/require-db.js";
+import { authRouter } from "./modules/auth/auth.routes.js";
 import { healthRouter } from "./modules/health/health.routes.js";
 
 /**
@@ -13,14 +15,20 @@ export function createApp(): Express {
   const app = express();
 
   app.disable("x-powered-by");
+  // Behind Vercel's edge proxy, the real client IP/protocol come from
+  // X-Forwarded-*; trusting the first hop is what makes req.ip (used for
+  // login throttling) and req.protocol (used for the CSRF self-origin
+  // check) reflect the actual client instead of the proxy.
+  app.set("trust proxy", 1);
   app.use(express.json());
   app.use(requestId);
 
   app.use("/api/v1", healthRouter);
+  app.use("/api/v1", requireDb, authRouter);
 
   // Future feature routers that need the database are mounted here, each
   // guarded by the requireDb middleware, e.g.:
-  // app.use("/api/v1/jobs", requireDb, jobsRouter);
+  // app.use("/api/v1/jobs", requireDb, authenticate, jobsRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);
