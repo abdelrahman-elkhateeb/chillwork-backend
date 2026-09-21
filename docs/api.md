@@ -101,11 +101,232 @@ All timestamps in requests and responses are ISO 8601 strings in UTC
 (e.g. `2026-09-21T14:03:00.000Z`). Clients are responsible for converting
 to local time for display.
 
-## Authentication
+## Authentication (FS02)
 
-There is no authentication in this foundation. Cookie-based session
-authentication is planned for **FS-02** and will be documented here once
-implemented. Until then, all routes are unauthenticated.
+Session authentication is cookie-based. On every request, the JWT in
+`access_token` is only ever a *pointer* to server-side state — it is
+**never** sufficient on its own. Every protected request re-validates,
+straight from MongoDB:
+
+1. the JWT's signature and expiration,
+2. that the session it names still exists and hasn't been revoked,
+3. that the session's rolling and absolute expiry haven't passed,
+4. that the user still exists and is active,
+5. that the user still belongs to the session's company, and the company
+   is active.
+
+A valid, unexpired JWT whose session has been revoked is rejected with
+`401 SESSION_REVOKED` — revocation always wins.
+
+### Lifetimes
+
+| Token / session       | Lifetime                                   |
+| ---------------------- | ------------------------------------------- |
+| Access JWT              | 15 minutes                                 |
+| Session rolling expiry  | 7 days from the most recent refresh        |
+| Session absolute expiry | 30 days from the original login, fixed     |
+
+The rolling expiry is always `min(now + 7 days, absoluteExpiresAt)` —
+`absoluteExpiresAt` is computed once at login and never moves, so no
+sequence of refreshes can keep a session alive past 30 days from its
+original login.
+
+### Cookies
+
+| Cookie          | Contents                          | Path              | Notes |
+| ---------------- | ---------------------------------- | ------------------ | ----- |
+| `access_token`   | JWT (`sub`, `sid`, `iat`, `exp`)   | `/`                | 15-minute `Max-Age` |
+| `refresh_token`  | Opaque random token (never a JWT) | `/api/v1/auth`     | `Max-Age` matches the session's rolling expiry |
+
+Both cookies are always `HttpOnly`; `Secure` is on in production and
+configurable via `AUTH_COOKIE_SECURE`; `SameSite` defaults to `Lax`
+(`AUTH_COOKIE_SAME_SITE`). **Neither cookie ever sets a `Domain`
+attribute** — this is required for the same-origin proxy FS01 depends on.
+Final CORS/domain configuration is FS33's responsibility, not FS02's.
+
+The refresh token itself is 256 bits of `crypto.randomBytes`, base64url
+-encoded. Only its SHA-256 hash is ever persisted — the raw value exists
+solely in the cookie and the response that set it, and is never returned
+in a JSON body.
+
+### Endpoints
+
+#### `POST /api/v1/auth/login`
+
+Public. Subject to [throttling](#throttling) and the
+[CSRF/origin guard](#csrforigin-protection).
+
+Request body:
+
+```json
+{ "email": "user@example.com", "password": "..." }
+```
+
+Response `200` sets `access_token`/`refresh_token` cookies and returns:
+
+```json
+{
+  "data": {
+    "user": { "id": "...", "email": "...", "name": "...", "companyId": "..." },
+    "session": { "id": "...", "expiresAt": "2026-09-29T00:00:00.000Z" }
+  }
+}
+```
+
+Errors: `VALIDATION_ERROR` (400), `INVALID_CREDENTIALS` (401 — returned
+identically for an unknown email, a wrong password, or a deactivated
+user/company, so login can't be used to enumerate accounts),
+`RATE_LIMITED` (429), `CSRF_ORIGIN_REJECTED` (403).
+
+#### `POST /api/v1/auth/refresh`
+
+Requires the `refresh_token` cookie. Subject to the CSRF/origin guard.
+Rotates the refresh token (see [Concurrent refresh
+policy](#concurrent-refresh-policy--reuse-detection)) and issues a new
+15-minute access JWT.
+
+Response `200` sets fresh cookies and returns:
+
+```json
+{ "data": { "session": { "id": "...", "expiresAt": "..." } } }
+```
+
+Errors: `INVALID_REFRESH_TOKEN` (401 — missing, malformed, or a token this
+API has no record of), `REFRESH_TOKEN_REUSED` (401 — a detected replay;
+the session is revoked), `SESSION_REVOKED` (401), `SESSION_EXPIRED` (401
+— rolling or absolute), `UNAUTHORIZED` (401 — user inactive or company
+membership no longer valid), `CSRF_ORIGIN_REJECTED` (403).
+
+#### `POST /api/v1/auth/logout`
+
+Identifies the session from the `refresh_token` cookie (not the access
+JWT, so logout still works if the access token already expired) and
+revokes only that session. Always clears both cookies and always returns
+`200`, whether or not a session was found — this is what keeps repeated
+logout calls safe.
+
+```json
+{ "data": { "loggedOut": true } }
+```
+
+### Session architecture
+
+Every login creates a brand-new, independent `Session` document — logging
+in on a second device never touches the first device's session, and
+revoking one never affects the other. There is no cross-session/device
+grouping beyond "same user, same company".
+
+### Concurrent refresh policy & reuse detection
+
+Each session tracks exactly **one current** refresh token hash and **one
+immediately-previous** token hash (with its own short grace expiry) — not
+a full history. Rotation is a MongoDB compare-and-swap on the current
+token hash, so only one writer can ever advance a given generation.
+
+On `POST /api/v1/auth/refresh`, the presented token is classified as:
+
+- **current** — the normal case; rotates immediately.
+- **previous, within its grace window** (`AUTH_REFRESH_GRACE_MS`, default
+  10 seconds) — treated as a legitimate near-simultaneous race (e.g. two
+  tabs, or a proactive-refresh timer racing a reactive one) and rotated
+  again from whatever is now current. Both racing requests succeed and
+  each gets a valid (different) new token; since browsers keep only the
+  last `Set-Cookie` they receive for a given cookie name, this is
+  invisible to the client — whichever response lands last is simply the
+  one that's used next.
+- **previous, past its grace window** — genuine reuse. The session is
+  revoked (`revokedReason: "reuse_detected"`) and `REFRESH_TOKEN_REUSED`
+  is returned. Only this device's session is revoked; other sessions for
+  the same user are untouched.
+- **neither current nor previous** (i.e. a token from two or more
+  rotations ago) — treated as **unknown**, not reuse: since this design
+  only remembers one generation of history, an older token can no longer
+  be distinguished from "never issued". It is still safely rejected
+  (`INVALID_REFRESH_TOKEN`), just without triggering session revocation.
+  A single legitimate client always ends up presenting only the most
+  recent token it was given (see above), so this path is not expected to
+  fire for real traffic — it exists as a documented boundary, not a gap
+  a normal client can hit.
+
+**Accepted tradeoff:** the grace window that absorbs legitimate races is,
+by construction, also a window in which a stolen-but-not-yet-used token
+could be replayed without triggering detection. This window is kept short
+specifically to bound that exposure, and it only matters if a refresh
+token was already exfiltrated despite `HttpOnly`/`Secure` cookies (i.e.
+XSS can't reach it; this covers e.g. a TLS-terminating proxy compromise).
+This is a deliberate, documented choice, not an oversight.
+
+**Absolute-expiry interaction:** every rotation — including the
+grace-window path — still runs the full `validateSessionContext` check
+(revocation, rolling/absolute expiry, user/company state) before issuing
+new tokens. A session past its absolute expiry cannot be refreshed via
+any of these paths, grace window or not.
+
+### Session invalidation
+
+`src/modules/auth/auth.service.ts` exports three reusable primitives on
+top of the same revocation write:
+
+- `revokeCurrentSession(sessionId)` — used by logout.
+- `revokeSessionById(sessionId, reason)`
+- `revokeAllUserSessions(userId, reason)` — revokes every active session
+  for a user across all devices.
+
+No password-reset feature exists yet in this repository (FS02 spec
+explicitly scopes that out). When one is built, it should call
+`revokeAllUserSessions(userId, "password_reset")` after a successful
+reset rather than reimplementing invalidation; the same call with
+`"manual"` is the right tool for an admin-initiated deactivation.
+
+### CSRF/origin protection
+
+`POST`/`PUT`/`PATCH`/`DELETE` requests require an `Origin` header (falling
+back to `Referer`) matching either the request's own origin (always
+allowed — this is what keeps the same-origin proxy setup working with no
+configuration) or an entry in `AUTH_ALLOWED_ORIGINS` (comma-separated,
+empty by default). A missing or mismatched origin is rejected with `403
+CSRF_ORIGIN_REJECTED`. `GET`/`HEAD`/`OPTIONS` are never checked. This is
+defense-in-depth on top of `SameSite` cookies, not a replacement for it —
+`AUTH_ALLOWED_ORIGINS` intentionally has no hardcoded production frontend
+domain; that's FS33's call.
+
+### Throttling
+
+Login attempts are throttled through a MongoDB-backed fixed-window
+counter (`src/modules/auth/auth-throttle.model.ts`) — never process
+memory, since this API runs as multiple concurrent Vercel instances that
+share nothing but the database. Two independent buckets apply per login
+attempt, either of which can trip first:
+
+| Bucket | Key | Default limit | Default window |
+| ------ | --- | -------------- | ---------------- |
+| Per-IP | `login:ip:<ip>` | 20 | 15 minutes |
+| Per-account + IP | `login:account:<sha256(email)>:<ip>` | 5 | 15 minutes |
+
+Scoping the stricter bucket to *(account, source IP)* rather than the
+account alone is deliberate: a remote attacker spamming one victim's
+email can't lock that account out for the victim's own, different,
+source IP — this repo does **not** implement a pure failed-attempt
+account lockout, since that would let an attacker lock out an arbitrary
+victim. Both limits are configurable
+(`AUTH_LOGIN_MAX_ATTEMPTS_PER_IP`, `AUTH_LOGIN_MAX_ATTEMPTS_PER_ACCOUNT`,
+`AUTH_LOGIN_WINDOW_MS`) and self-clear via a TTL index — there is no
+manual unlock step. Exceeding either returns `429 RATE_LIMITED`.
+
+### Error codes introduced by FS02
+
+`INVALID_CREDENTIALS`, `SESSION_EXPIRED`, `SESSION_REVOKED`,
+`INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_REUSED`, `RATE_LIMITED`,
+`CSRF_ORIGIN_REJECTED` — all follow the standard error envelope above.
+
+### Assumption (OPEN DECISION resolved with a default)
+
+FS01 doesn't define a `User`/`Company` relationship — FS02 adds a minimal
+one: **one company per user** (`User.companyId`, required). This is a
+simple, explicit default rather than a silent guess at a multi-company
+membership model; if a user needs to belong to multiple companies later,
+that's a schema change for whichever feature introduces it, not a FS02
+concern.
 
 ## Endpoints
 
