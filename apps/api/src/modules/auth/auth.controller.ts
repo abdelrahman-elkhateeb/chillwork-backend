@@ -2,19 +2,48 @@ import type { NextFunction, Request, Response } from "express";
 import { success } from "../../lib/envelope.js";
 import { HttpError } from "../../lib/http-error.js";
 import type { UserDocument } from "../users/user.model.js";
-import { checkLoginThrottle, login, refresh, revokeCurrentSession } from "./auth.service.js";
+import { checkLoginThrottle, checkRegisterThrottle, login, refresh, register, revokeCurrentSession } from "./auth.service.js";
 import { clearAuthCookies, readAuthCookies, setAuthCookies } from "./auth.cookies.js";
-import { loginSchema } from "./auth.schemas.js";
+import { loginSchema, registerSchema } from "./auth.schemas.js";
 import { hashRefreshToken } from "./auth.tokens.js";
 import { Session } from "./session.model.js";
 
+/**
+ * Never the raw Mongoose document — used by both login and register so
+ * there's exactly one place that decides which User fields are safe to
+ * return (never passwordHash, never anything session-related).
+ */
 function toSafeUser(user: UserDocument) {
   return {
     id: user._id.toString(),
     email: user.email,
     name: user.name,
+    phone: user.phone,
+    role: user.role,
     companyId: user.companyId.toString(),
   };
+}
+
+/**
+ * Registration is intentionally separate from authentication: it creates
+ * a User and nothing else — no Session, no tokens, no cookies. The
+ * documented MVP flow is register (201) then a separate POST /auth/login
+ * call. Throttling runs before anything expensive (company lookup,
+ * uniqueness check, password hashing).
+ */
+export async function postRegister(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const input = registerSchema.parse(req.body);
+    const ip = req.ip ?? "unknown";
+
+    await checkRegisterThrottle(ip);
+
+    const user = await register(input);
+
+    res.status(201).json(success({ user: toSafeUser(user) }));
+  } catch (error) {
+    next(error);
+  }
 }
 
 export async function postLogin(req: Request, res: Response, next: NextFunction): Promise<void> {
