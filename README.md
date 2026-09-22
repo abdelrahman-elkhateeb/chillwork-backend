@@ -63,6 +63,9 @@ cp .env.example .env
 | `AUTH_LOGIN_MAX_ATTEMPTS_PER_ACCOUNT` | no | `5` | login throttle, per account+IP     |
 | `AUTH_LOGIN_MAX_ATTEMPTS_PER_IP` | no | `20`     | login throttle, per IP                   |
 | `AUTH_LOGIN_WINDOW_MS` | no | `900000`        | login throttle window, ms (15 min)       |
+| `DEMO_COMPANY_ID` | no* | —          | the single company registration assigns users to; *registration (`POST /auth/register`) fails with 503 until this is set to a real, active Company `_id` |
+| `AUTH_REGISTER_MAX_ATTEMPTS_PER_IP` | no | `10` | registration throttle, per IP            |
+| `AUTH_REGISTER_WINDOW_MS` | no | `3600000` | registration throttle window, ms (1 hour) |
 
 Startup fails fast with a clear error message if required variables are
 missing or invalid (see `src/config/env.ts`). See
@@ -103,6 +106,11 @@ Run from `apps/api/`:
 - Cookie-based session authentication (FS02) is implemented — see
   [docs/api.md](docs/api.md) for the full design (JWT/session split,
   refresh rotation, reuse detection, CSRF, throttling).
+- Public customer registration (FS04, `POST /auth/register`) is
+  implemented — see [docs/api.md](docs/api.md). It creates a `CUSTOMER`
+  user only, with no session/tokens; the user logs in separately
+  afterwards. Requires `DEMO_COMPANY_ID` to be set to a real Company's
+  `_id` or it fails safely with 503.
 - There is no lint tooling configured in this repository yet (no ESLint
-  config/script exists) — setting one up is out of scope for FS02.
+  config/script exists) — setting one up is out of scope for FS02/FS04.
 - Logs never include secrets, tokens, cookies, or raw request bodies.

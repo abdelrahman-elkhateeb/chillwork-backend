@@ -151,6 +151,104 @@ in a JSON body.
 
 ### Endpoints
 
+#### `POST /api/v1/auth/register`
+
+Public customer self-registration (FS04). Subject to its own
+[throttling](#throttling) bucket and the
+[CSRF/origin guard](#csrforigin-protection). **Does not create a session**
+— registration and authentication are deliberately separate. The
+documented flow is:
+
+```
+POST /auth/register → 201 Created → POST /auth/login → authenticated session
+```
+
+Request body:
+
+```json
+{
+  "name": "Jane Customer",
+  "email": "jane@example.com",
+  "phone": "+1 555 000 1111",
+  "password": "correct-horse-battery-staple"
+}
+```
+
+| Field | Rule |
+| ----- | ---- |
+| `name` | required, trimmed, 2–100 characters |
+| `email` | required, valid email, normalized to lowercase (case-insensitive uniqueness) |
+| `phone` | required; spaces/dashes/parentheses stripped, then must match `^\+?[1-9]\d{6,14}$` (optional leading `+`, 7–15 digits, no leading zero — a simplified E.164 shape; no prior phone convention existed in this repo, so this is FS04's documented MVP rule) |
+| `password` | required, minimum 8 characters (no additional complexity rule) |
+
+Any other field in the request body (`role`, `companyId`, `userId`,
+`isAdmin`, access/refresh tokens, etc.) is **silently dropped** by the
+request schema before the service layer ever sees it — this, not a
+runtime permission check, is what makes role/company tampering
+impossible: the code creating the user is never given those fields to
+read in the first place.
+
+Response `201`:
+
+```json
+{
+  "data": {
+    "user": {
+      "id": "...",
+      "email": "jane@example.com",
+      "name": "Jane Customer",
+      "phone": "+15550001111",
+      "role": "CUSTOMER",
+      "companyId": "..."
+    }
+  }
+}
+```
+
+`role` is always `"CUSTOMER"` — hardcoded server-side, never read from the
+request. There is currently no public registration path to `ADMIN` or
+`TECHNICIAN` at all. `companyId` is always the server-resolved [demo
+company](#company-assignment), never client-supplied.
+
+Errors: `VALIDATION_ERROR` (400), `CONFLICT` (409 — email already
+registered, checked at the application level and enforced again by
+`User.email`'s unique index so two concurrent registrations for the same
+address can't both succeed), `DEMO_COMPANY_UNAVAILABLE` (503 — see
+[Company assignment](#company-assignment)), `RATE_LIMITED` (429),
+`CSRF_ORIGIN_REJECTED` (403).
+
+##### Company assignment
+
+The MVP is single-tenant: every publicly-registered user is assigned to
+one pre-existing Company, configured via `DEMO_COMPANY_ID` (its
+MongoDB `_id`). This is deliberately **not** auto-created by the
+application — registration must never have the side effect of silently
+minting a new company — so an operator provisions the Company document
+once (e.g. via `mongosh`) and sets `DEMO_COMPANY_ID`. If it's unset,
+malformed, points at a missing company, or the company is inactive,
+registration fails with `503 DEMO_COMPANY_UNAVAILABLE` and creates no
+user, rather than guessing or creating one.
+
+##### Email uniqueness & concurrent registration
+
+Registration checks for an existing user with the normalized email
+first (a clean, fast user-facing `CONFLICT`), then relies on
+`User.email`'s unique index as the actual concurrency guard: two
+requests racing the same email can both pass the initial check, but only
+one `User.create` can win — the loser's insert fails with a MongoDB
+duplicate-key error, which is caught and converted to the same
+`CONFLICT` response rather than a raw database error. Exactly one
+account is ever created for a given normalized email.
+
+##### Password handling
+
+Reuses FS02's existing scrypt implementation
+(`src/modules/users/password.js`) unchanged — no bcrypt, no second
+hashing mechanism. The plaintext password is hashed before the user is
+created and is never stored, logged, or returned; `passwordHash` stays
+`select: false` on the `User` model, so it never accidentally appears in
+a query result used to build a response.
+
 #### `POST /api/v1/auth/login`
 
 Public. Subject to [throttling](#throttling) and the
@@ -300,26 +398,34 @@ attempt, either of which can trip first:
 
 | Bucket | Key | Default limit | Default window |
 | ------ | --- | -------------- | ---------------- |
-| Per-IP | `login:ip:<ip>` | 20 | 15 minutes |
-| Per-account + IP | `login:account:<sha256(email)>:<ip>` | 5 | 15 minutes |
+| Login, per-IP | `login:ip:<ip>` | 20 | 15 minutes |
+| Login, per-account + IP | `login:account:<sha256(email)>:<ip>` | 5 | 15 minutes |
+| Register, per-IP | `register:ip:<ip>` | 10 | 1 hour |
 
-Scoping the stricter bucket to *(account, source IP)* rather than the
+Scoping login's stricter bucket to *(account, source IP)* rather than the
 account alone is deliberate: a remote attacker spamming one victim's
 email can't lock that account out for the victim's own, different,
 source IP — this repo does **not** implement a pure failed-attempt
 account lockout, since that would let an attacker lock out an arbitrary
-victim. Both limits are configurable
-(`AUTH_LOGIN_MAX_ATTEMPTS_PER_IP`, `AUTH_LOGIN_MAX_ATTEMPTS_PER_ACCOUNT`,
-`AUTH_LOGIN_WINDOW_MS`) and self-clear via a TTL index — there is no
-manual unlock step. Exceeding either returns `429 RATE_LIMITED`.
+victim. Registration has no pre-existing account to scope a stricter
+bucket to, so it's per-IP only, with its own configurable limit/window
+(`AUTH_REGISTER_MAX_ATTEMPTS_PER_IP`, `AUTH_REGISTER_WINDOW_MS`) rather
+than reusing login's — abuse patterns (scripted mass account creation vs.
+credential guessing) are different enough to warrant separate knobs. All
+limits are configurable and self-clear via a TTL index — there is no
+manual unlock step. The registration throttle check runs before company
+resolution, the uniqueness check, and password hashing, so an
+over-the-limit request is rejected as cheaply as possible. Exceeding any
+bucket returns `429 RATE_LIMITED`.
 
-### Error codes introduced by FS02
+### Error codes introduced by FS02 / FS04
 
 `INVALID_CREDENTIALS`, `SESSION_EXPIRED`, `SESSION_REVOKED`,
 `INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_REUSED`, `RATE_LIMITED`,
-`CSRF_ORIGIN_REJECTED` — all follow the standard error envelope above.
+`CSRF_ORIGIN_REJECTED` (FS02), `CONFLICT`, `DEMO_COMPANY_UNAVAILABLE`
+(FS04) — all follow the standard error envelope above.
 
-### Assumption (OPEN DECISION resolved with a default)
+### Assumptions (OPEN DECISIONs resolved with a default)
 
 FS01 doesn't define a `User`/`Company` relationship — FS02 adds a minimal
 one: **one company per user** (`User.companyId`, required). This is a
@@ -327,6 +433,13 @@ simple, explicit default rather than a silent guess at a multi-company
 membership model; if a user needs to belong to multiple companies later,
 that's a schema change for whichever feature introduces it, not a FS02
 concern.
+
+FS01/FS02 also never defined a role field — FS04 adds `User.role`
+(`CUSTOMER | ADMIN | TECHNICIAN`, required, no schema default so every
+creation path must state it explicitly). Public registration is the only
+role-assigning path that exists today, and it always writes `CUSTOMER`.
+There is no creation path for `ADMIN`/`TECHNICIAN` accounts yet — that's
+out of FS04's scope, not an oversight.
 
 ## Endpoints
 
