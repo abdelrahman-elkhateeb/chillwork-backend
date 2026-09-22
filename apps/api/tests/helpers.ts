@@ -1,8 +1,9 @@
 import type { Express } from "express";
+import { Types } from "mongoose";
 import request, { type Response, type Test } from "supertest";
 import { Company } from "../src/modules/companies/company.model.js";
 import { hashPassword } from "../src/modules/users/password.js";
-import { User } from "../src/modules/users/user.model.js";
+import { User, type UserRole } from "../src/modules/users/user.model.js";
 
 export const PASSWORD = "Sup3r-Secret-Passw0rd!";
 
@@ -34,16 +35,45 @@ export async function createCompany(overrides: { name?: string; isActive?: boole
 
 export async function createUser(
   companyId: unknown,
-  overrides: { email?: string; name?: string; isActive?: boolean; password?: string } = {}
+  overrides: {
+    email?: string;
+    name?: string;
+    phone?: string;
+    role?: UserRole;
+    isActive?: boolean;
+    password?: string;
+  } = {}
 ) {
   const passwordHash = await hashPassword(overrides.password ?? PASSWORD);
   return User.create({
     email: overrides.email ?? `${unique("user")}@example.com`,
     name: overrides.name ?? "Test User",
+    phone: overrides.phone ?? "+15550001111",
     passwordHash,
+    role: overrides.role ?? "CUSTOMER",
     companyId,
     isActive: overrides.isActive ?? true,
   });
+}
+
+/**
+ * FS04: registration resolves a single, ops-provisioned demo company via
+ * DEMO_COMPANY_ID rather than creating one itself. Since `env` is loaded
+ * once and frozen, tests can't change that id at runtime — instead this
+ * (re)creates the actual Company document at the fixed id global-setup.ts
+ * put in DEMO_COMPANY_ID, which setup-file.ts's afterEach wipes between
+ * tests like every other collection.
+ */
+export async function ensureDemoCompany(overrides: { isActive?: boolean } = {}) {
+  const demoCompanyId = process.env.DEMO_COMPANY_ID;
+  if (!demoCompanyId) {
+    throw new Error("DEMO_COMPANY_ID was not set by tests/global-setup.ts");
+  }
+  return Company.findOneAndUpdate(
+    { _id: new Types.ObjectId(demoCompanyId) },
+    { $set: { name: "Demo Company", isActive: overrides.isActive ?? true } },
+    { upsert: true, new: true }
+  );
 }
 
 /** Parses `Set-Cookie` response headers into a plain name -> value map. */

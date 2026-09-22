@@ -1,4 +1,5 @@
 import { MongoMemoryServer } from "mongodb-memory-server";
+import { Types } from "mongoose";
 
 /**
  * Runs once, before any test file is loaded, in vitest's orchestrator
@@ -20,6 +21,12 @@ export default async function globalSetup() {
   process.env.AUTH_LOGIN_MAX_ATTEMPTS_PER_IP = "20";
   process.env.AUTH_LOGIN_WINDOW_MS = "900000";
   process.env.AUTH_ALLOWED_ORIGINS = "http://allowed-origin.example.com";
+  // Fixed for the whole run (env is loaded once and frozen) — tests
+  // create/refresh the actual Company document at this _id via
+  // tests/helpers.ts's ensureDemoCompany(), not this env var itself.
+  process.env.DEMO_COMPANY_ID = new Types.ObjectId().toString();
+  process.env.AUTH_REGISTER_MAX_ATTEMPTS_PER_IP = "5";
+  process.env.AUTH_REGISTER_WINDOW_MS = "3600000";
 
   const mongo = await MongoMemoryServer.create();
   process.env.MONGODB_URI = mongo.getUri("fs-api-test");
