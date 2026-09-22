@@ -2,9 +2,12 @@ import { createHash } from "node:crypto";
 import type { Types } from "mongoose";
 import { env } from "../../config/env.js";
 import { HttpError } from "../../lib/http-error.js";
+import { isDuplicateKeyError } from "../../lib/mongo-errors.js";
 import { Company } from "../companies/company.model.js";
+import { resolveDemoCompany } from "../companies/company.service.js";
 import { hashPassword, verifyPassword } from "../users/password.js";
 import { User, type UserDocument } from "../users/user.model.js";
+import type { RegisterInput } from "./auth.schemas.js";
 import { recordAttempt } from "./auth-throttle.model.js";
 import { SESSION_ABSOLUTE_TTL_MS, SESSION_ROLLING_TTL_MS } from "./auth.constants.js";
 import { generateRefreshToken, hashRefreshToken, signAccessToken } from "./auth.tokens.js";
@@ -110,6 +113,61 @@ async function createSession(user: UserDocument, now: Date): Promise<AuthResult>
     session,
     user,
   };
+}
+
+/**
+ * Registration's own, coarser throttle (see docs/api.md "Throttling") —
+ * per-IP only, since there's no pre-existing account to scope a stricter
+ * bucket to the way login's per-account+IP bucket does.
+ */
+export async function checkRegisterThrottle(ip: string, now: Date = new Date()): Promise<void> {
+  const count = await recordAttempt(`register:ip:${ip}`, env.AUTH_REGISTER_WINDOW_MS, now);
+  if (count > env.AUTH_REGISTER_MAX_ATTEMPTS_PER_IP) {
+    throw HttpError.rateLimited();
+  }
+}
+
+/**
+ * Public customer registration. Deliberately does NOT create a Session or
+ * issue any tokens — the documented MVP flow is register (201) then a
+ * separate login call (see docs/api.md "Customer registration"). Role is
+ * always "CUSTOMER" and the company is always the server-resolved demo
+ * company; `input` only ever has name/email/phone/password (see
+ * registerSchema) so there is nothing for a client to tamper with here.
+ *
+ * Order follows docs/api.md's documented registration flow: resolve the
+ * company, check the normalized email, hash the password, then create —
+ * with the schema-level unique index as the final concurrency guard
+ * against two requests racing the findOne check.
+ */
+export async function register(input: RegisterInput): Promise<UserDocument> {
+  const normalizedEmail = input.email.toLowerCase().trim();
+
+  const company = await resolveDemoCompany();
+
+  const existing = await User.findOne({ email: normalizedEmail });
+  if (existing) {
+    throw HttpError.conflict("An account with this email already exists");
+  }
+
+  const passwordHash = await hashPassword(input.password);
+
+  try {
+    return await User.create({
+      email: normalizedEmail,
+      name: input.name,
+      phone: input.phone,
+      passwordHash,
+      role: "CUSTOMER",
+      companyId: company._id,
+      isActive: true,
+    });
+  } catch (error) {
+    if (isDuplicateKeyError(error)) {
+      throw HttpError.conflict("An account with this email already exists");
+    }
+    throw error;
+  }
 }
 
 export interface SessionContext {

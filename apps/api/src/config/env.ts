@@ -37,6 +37,19 @@ const envSchema = z.object({
   AUTH_LOGIN_MAX_ATTEMPTS_PER_ACCOUNT: z.coerce.number().int().positive().default(5),
   AUTH_LOGIN_MAX_ATTEMPTS_PER_IP: z.coerce.number().int().positive().default(20),
   AUTH_LOGIN_WINDOW_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
+
+  // Registration (FS04) ----------------------------------------------------
+  // The MVP is single-tenant: every publicly-registered user is assigned
+  // to this one, ops-provisioned Company document. Deliberately NOT
+  // auto-created by the app — registration must fail safely rather than
+  // silently create a company — so this has no default. See
+  // docs/api.md "Company assignment".
+  DEMO_COMPANY_ID: z.string().optional(),
+
+  // Own, coarser throttle than login's (no pre-existing account to scope
+  // a stricter bucket to) — per-IP only. See docs/api.md "Throttling".
+  AUTH_REGISTER_MAX_ATTEMPTS_PER_IP: z.coerce.number().int().positive().default(10),
+  AUTH_REGISTER_WINDOW_MS: z.coerce.number().int().positive().default(60 * 60 * 1000),
 });
 
 type RawEnv = z.infer<typeof envSchema>;

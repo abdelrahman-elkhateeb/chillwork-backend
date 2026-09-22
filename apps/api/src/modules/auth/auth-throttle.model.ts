@@ -1,4 +1,5 @@
 import { Schema, model } from "mongoose";
+import { isDuplicateKeyError } from "../../lib/mongo-errors.js";
 
 /**
  * Shared, MongoDB-backed fixed-window counter. Deliberately NOT
@@ -67,8 +68,4 @@ export async function recordAttempt(
     }
     throw error;
   }
-}
-
-function isDuplicateKeyError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === 11000;
 }

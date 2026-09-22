@@ -69,4 +69,8 @@ export class HttpError extends Error {
   static csrfOriginRejected(message = "Request origin is not allowed"): HttpError {
     return new HttpError(403, "CSRF_ORIGIN_REJECTED", message);
   }
+
+  static demoCompanyUnavailable(message = "Registration is temporarily unavailable"): HttpError {
+    return new HttpError(503, "DEMO_COMPANY_UNAVAILABLE", message);
+  }
 }
