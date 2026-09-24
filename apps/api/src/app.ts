@@ -5,6 +5,7 @@ import { requestId } from "./middleware/request-id.js";
 import { requireDb } from "./middleware/require-db.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { healthRouter } from "./modules/health/health.routes.js";
+import { requestsRouter } from "./modules/requests/request.routes.js";
 
 /**
  * Builds and returns the Express application. Never calls listen() here —
@@ -25,6 +26,7 @@ export function createApp(): Express {
 
   app.use("/api/v1", healthRouter);
   app.use("/api/v1", requireDb, authRouter);
+  app.use("/api/v1", requireDb, requestsRouter);
 
   // Future feature routers that need the database are mounted here, each
   // guarded by the requireDb middleware, e.g.:

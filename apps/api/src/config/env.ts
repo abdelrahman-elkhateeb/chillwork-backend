@@ -70,6 +70,16 @@ const envSchema = z.object({
   // per-minute limits.
   GEMINI_RATE_LIMIT_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   GEMINI_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+
+  // Service requests (FS15) --------------------------------------------------
+  // Per-customer submission throttle, MongoDB-backed (reuses the same
+  // primitive as everything else). This exists because the Gemini
+  // throttle above is a single *global* bucket protecting the shared
+  // provider quota — without a per-customer ceiling here, one customer
+  // submitting many distinct requests could exhaust that shared quota for
+  // everyone before ever tripping a per-caller limit.
+  REQUEST_CREATE_MAX_ATTEMPTS_PER_USER: z.coerce.number().int().positive().default(20),
+  REQUEST_CREATE_WINDOW_MS: z.coerce.number().int().positive().default(60 * 60 * 1000),
 });
 
 type RawEnv = z.infer<typeof envSchema>;

@@ -73,4 +73,28 @@ export class HttpError extends Error {
   static demoCompanyUnavailable(message = "Registration is temporarily unavailable"): HttpError {
     return new HttpError(503, "DEMO_COMPANY_UNAVAILABLE", message);
   }
+
+  static missingIdempotencyKey(message = "Idempotency-Key header is required"): HttpError {
+    return new HttpError(400, "MISSING_IDEMPOTENCY_KEY", message);
+  }
+
+  static invalidIdempotencyKey(message = "Idempotency-Key header is invalid"): HttpError {
+    return new HttpError(400, "INVALID_IDEMPOTENCY_KEY", message);
+  }
+
+  static idempotencyInProgress(message = "This submission is already being processed"): HttpError {
+    return new HttpError(409, "IDEMPOTENCY_IN_PROGRESS", message);
+  }
+
+  static idempotencyConflict(message = "This Idempotency-Key was already used with different request data"): HttpError {
+    return new HttpError(409, "IDEMPOTENCY_CONFLICT", message);
+  }
+
+  static photoNotAvailable(message = "Photo attachments are not available yet"): HttpError {
+    return new HttpError(503, "PHOTO_NOT_AVAILABLE", message);
+  }
+
+  static requestCreationFailed(message = "Unable to create the request, please try again"): HttpError {
+    return new HttpError(500, "REQUEST_CREATION_FAILED", message);
+  }
 }
