@@ -515,6 +515,145 @@ role-assigning path that exists today, and it always writes `CUSTOMER`.
 There is no creation path for `ADMIN`/`TECHNICIAN` accounts yet — that's
 out of FS04's scope, not an oversight.
 
+## AI device analysis (FS14)
+
+**This is not an HTTP endpoint.** `analyzeDevices()` is an internal,
+server-only service function — `src/modules/ai/gemini.service.ts` — for
+another backend feature (FS15, `POST /requests`, not yet implemented) to
+call before persisting a service request. There is no public `/ai/*`
+route and none should be added; a user never triggers a Gemini call
+directly.
+
+Purpose: given a customer's per-device description and equipment
+details, produce a structured, bounded AI analysis (summary, possible
+causes, missing information, inspection questions) *before* the request
+record is persisted, so the persisted record always has both the
+customer's original text and (when available) the analysis together —
+never the analysis in place of the original text.
+
+### Internal contract
+
+```ts
+analyzeDevices(
+  { devices: [{ clientDeviceId, originalDescription, equipment }] },
+  { requestId? } // optional, log correlation only
+): Promise<{
+  devices: [{
+    clientDeviceId,
+    originalDescription,   // byte-identical to the input
+    analysis: { summary, possibleCauses, missingInformation, inspectionQuestions } | null,
+    metadata: { status, model, promptVersion, processedAt, errorCode? }
+  }]
+}>
+```
+
+- `clientDeviceId` is how a result is matched to its device — always by
+  this key, never by array position (the provider may return devices in
+  a different order, or omit one).
+- `originalDescription` is returned exactly as submitted. It is never
+  trimmed, normalized, or replaced by AI-generated text — validation
+  checks it without transforming the value it hands back.
+- `analysis` is `null` whenever `metadata.status !== "SUCCESS"` — a
+  failed/unavailable analysis never contains invented content.
+- Calling this with structurally invalid input (e.g. no devices) throws
+  — that's a caller/integration bug, not a provider failure. A *provider*
+  failure never throws; it always resolves with a controlled
+  `FAILED`/`UNAVAILABLE` result per device instead.
+
+### Gemini model selection
+
+**Model:** `gemini-3.8-flash` (`GEMINI_MODEL`, overridable).
+**Free-tier verification:** confirmed via `https://ai.google.dev/gemini-api/docs/pricing`
+and `https://ai.google.dev/gemini-api/docs/models` (fetched 2026-09-24),
+both listing `gemini-3.8-flash` as free-of-charge and as the current
+recommended general-purpose Flash model. Exact free-tier RPM/RPD figures
+are account-specific and shown live in Google AI Studio, not published
+as a static table — this is why the internal throttle default below is
+deliberately conservative rather than tuned to a specific published
+number.
+
+**Wire contract:** Google's "Interactions API"
+(`POST https://generativelanguage.googleapis.com/v1beta/interactions`,
+`x-goog-api-key` header, structured JSON output via
+`response_format.mime_type: "application/json"` + a JSON Schema), also
+verified against the same official docs on 2026-09-24. This superseded
+the older `models/{model}:generateContent` contract at some point after
+this repository's dependencies were last reviewed.
+
+**No fallback:** there is exactly one configured model. A failure of
+that model produces a `FAILED`/`UNAVAILABLE` result — it never triggers
+a second call, a different (e.g. paid) model, or a retry. See
+`tests/gemini.service.test.ts` ("no paid-model fallback") for the test
+proving exactly one provider attempt is ever made.
+
+**Provider client:** direct `fetch` (Node 24's built-in global), not the
+Google GenAI SDK — this repo already prefers small, dependency-free
+solutions where `fetch` is sufficient (see FS02's choice of `node:crypto`
+scrypt over bcrypt), and the Interactions API's request/response shape is
+simple enough that an SDK wouldn't meaningfully simplify it. No new
+dependency was added for FS14.
+
+### Configuration
+
+| Variable | Required | Default | Notes |
+| -------- | -------- | ------- | ----- |
+| `GEMINI_API_KEY` | no* | — | *no analysis can succeed without it, but the app still starts and every other feature still works if it's unset; `analyzeDevices()` returns a controlled `GEMINI_AUTH_ERROR` result instead |
+| `GEMINI_MODEL` | no | `gemini-3.8-flash` | single fixed model, no fallback list |
+| `GEMINI_TIMEOUT_MS` | no | `15000` | bounded via `AbortController`; a timeout becomes `GEMINI_TIMEOUT` |
+| `GEMINI_RATE_LIMIT_MAX_ATTEMPTS` | no | `5` | see "Rate limiting" below |
+| `GEMINI_RATE_LIMIT_WINDOW_MS` | no | `60000` | |
+
+The API key is never logged, never returned in any result, and never
+appears in a thrown/returned error — see `tests/gemini.service.test.ts`
+"secret and log safety".
+
+### Rate limiting
+
+Reuses FS02's existing MongoDB-backed `recordAttempt()` primitive
+(`src/modules/auth/auth-throttle.model.ts`) — no second rate-limit
+system, no Redis, no process memory. The bucket is a single **global**
+key (`gemini:global`), not per-user/company/IP: the thing actually being
+protected is the one shared free-tier quota behind `GEMINI_API_KEY`,
+which is a single resource regardless of how many callers/companies
+exist, so a global bucket is what actually models the constraint. The
+check runs before the provider is called (and before the prompt is even
+built) — exceeding it means Gemini is never invoked for that call.
+
+### Prompt version
+
+Fixed string constant (`PROMPT_VERSION = "v1"` in `gemini.constants.ts`),
+never a timestamp — it only changes when the prompt text is deliberately
+changed, so two results only share a `promptVersion` when they came from
+the same prompt. The prompt itself is never logged or persisted.
+
+### Failure semantics
+
+| errorCode | status | Meaning |
+| --------- | ------ | ------- |
+| `GEMINI_TIMEOUT` | `UNAVAILABLE` | call exceeded `GEMINI_TIMEOUT_MS` |
+| `GEMINI_QUOTA_EXCEEDED` | `UNAVAILABLE` | provider returned 429 |
+| `GEMINI_PROVIDER_UNAVAILABLE` | `UNAVAILABLE` | provider 5xx or network failure |
+| `GEMINI_AUTH_ERROR` | `UNAVAILABLE` | missing/rejected API key |
+| `GEMINI_RATE_LIMITED` | `UNAVAILABLE` | FS14's own throttle tripped before any provider call |
+| `GEMINI_INVALID_OUTPUT` | `FAILED` | provider responded, but the JSON was malformed or failed schema validation (missing fields, wrong types, or exceeded a bound) |
+
+`UNAVAILABLE` broadly means "we couldn't get a usable response from the
+provider" (worth retrying later); `FAILED` means "the provider responded
+but what it returned wasn't trustworthy." Neither ever produces invented
+analysis content, and neither is a reason to discard the original
+request data — persisting the request despite a failed/unavailable
+analysis is FS15's responsibility, not FS14's.
+
+### FS15 boundary
+
+FS14 owns `analyzeDevices()` and nothing else. It never touches a
+Service Request/Device persistence model (none exists in this repository
+yet), never persists a prompt or provider response, and never introduces
+an idempotency reservation. `POST /requests` — validation, auth/company
+ownership, calling `analyzeDevices()` at the right point (before
+persisting the request), persistence, idempotency, and the HTTP
+response — is entirely FS15's responsibility.
+
 ## Endpoints
 
 ### `GET /api/v1/health`

@@ -29,6 +29,8 @@ apps/api/           the entire application (package.json, tsconfig, lockfile)
                       token primitives, MongoDB-backed login throttling
       users/          User model, password hashing
       companies/      Company model
+      ai/             Gemini device analysis service (analyzeDevices()) —
+                       internal only, no HTTP route; see docs/api.md
       health/         liveness check
   tests/             vitest + supertest + mongodb-memory-server
 docs/                API and architecture documentation
@@ -66,6 +68,11 @@ cp .env.example .env
 | `DEMO_COMPANY_ID` | no* | —          | the single company registration assigns users to; *registration (`POST /auth/register`) fails with 503 until this is set to a real, active Company `_id` |
 | `AUTH_REGISTER_MAX_ATTEMPTS_PER_IP` | no | `10` | registration throttle, per IP            |
 | `AUTH_REGISTER_WINDOW_MS` | no | `3600000` | registration throttle window, ms (1 hour) |
+| `GEMINI_API_KEY` | no* | —          | *no analysis can succeed without it, but the app still starts and everything else still works if unset — see docs/api.md "AI device analysis (FS14)" |
+| `GEMINI_MODEL` | no | `gemini-3.8-flash` | single fixed model, no fallback |
+| `GEMINI_TIMEOUT_MS` | no | `15000` | bounded timeout for the Gemini call, ms |
+| `GEMINI_RATE_LIMIT_MAX_ATTEMPTS` | no | `5` | Gemini throttle, single global bucket |
+| `GEMINI_RATE_LIMIT_WINDOW_MS` | no | `60000` | Gemini throttle window, ms |
 
 Startup fails fast with a clear error message if required variables are
 missing or invalid (see `src/config/env.ts`). See
@@ -111,6 +118,13 @@ Run from `apps/api/`:
   user only, with no session/tokens; the user logs in separately
   afterwards. Requires `DEMO_COMPANY_ID` to be set to a real Company's
   `_id` or it fails safely with 503.
+- `GET /api/v1/auth/me` (FS05) restores the authenticated user after a
+  browser refresh, purely from cookies.
+- Gemini device analysis (FS14, `analyzeDevices()` in
+  `src/modules/ai/`) is implemented as an internal service, not an HTTP
+  endpoint — see [docs/api.md](docs/api.md) "AI device analysis (FS14)".
+  It's meant to be called by the future `POST /requests` (FS15, not yet
+  implemented) before a service request is persisted.
 - There is no lint tooling configured in this repository yet (no ESLint
-  config/script exists) — setting one up is out of scope for FS02/FS04.
+  config/script exists) — setting one up is out of scope for FS02/FS04/FS14.
 - Logs never include secrets, tokens, cookies, or raw request bodies.
