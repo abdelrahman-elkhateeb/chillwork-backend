@@ -492,12 +492,15 @@ resolution, the uniqueness check, and password hashing, so an
 over-the-limit request is rejected as cheaply as possible. Exceeding any
 bucket returns `429 RATE_LIMITED`.
 
-### Error codes introduced by FS02 / FS04
+### Error codes introduced by FS02 / FS04 / FS15
 
 `INVALID_CREDENTIALS`, `SESSION_EXPIRED`, `SESSION_REVOKED`,
 `INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_REUSED`, `RATE_LIMITED`,
 `CSRF_ORIGIN_REJECTED` (FS02), `CONFLICT`, `DEMO_COMPANY_UNAVAILABLE`
-(FS04) — all follow the standard error envelope above.
+(FS04), `MISSING_IDEMPOTENCY_KEY`, `INVALID_IDEMPOTENCY_KEY`,
+`IDEMPOTENCY_IN_PROGRESS`, `IDEMPOTENCY_CONFLICT`, `PHOTO_NOT_AVAILABLE`,
+`REQUEST_CREATION_FAILED` (FS15) — all follow the standard error
+envelope above.
 
 ### Assumptions (OPEN DECISIONs resolved with a default)
 
@@ -647,12 +650,177 @@ analysis is FS15's responsibility, not FS14's.
 ### FS15 boundary
 
 FS14 owns `analyzeDevices()` and nothing else. It never touches a
-Service Request/Device persistence model (none exists in this repository
-yet), never persists a prompt or provider response, and never introduces
-an idempotency reservation. `POST /requests` — validation, auth/company
-ownership, calling `analyzeDevices()` at the right point (before
-persisting the request), persistence, idempotency, and the HTTP
-response — is entirely FS15's responsibility.
+Service Request/Device persistence model, never persists a prompt or
+provider response, and never introduces an idempotency reservation.
+`POST /api/v1/requests` (see "Service requests (FS15)" below) owns
+validation, auth/company ownership, calling `analyzeDevices()` at the
+right point, persistence, idempotency, and the HTTP response.
+
+## Service requests (FS15)
+
+### `POST /api/v1/requests`
+
+Requires authentication and the `CUSTOMER` role — `ADMIN`/`TECHNICIAN`
+get `403 FORBIDDEN`. Subject to the [CSRF/origin
+guard](#csrforigin-protection) and its own per-customer throttle (see
+"Rate limiting" below).
+
+Request:
+
+```http
+POST /api/v1/requests
+Cookie: access_token=...; refresh_token=...
+Idempotency-Key: <client-generated key>
+Content-Type: application/json
+```
+
+```json
+{
+  "address": "123 Main St, Springfield",
+  "contactPhone": "+1 555 000 1111",
+  "devices": [
+    {
+      "clientDeviceId": "device-1",
+      "label": "Refrigerator",
+      "brand": "Acme",
+      "model": "X100",
+      "originalDescription": "Not cooling properly and making a buzzing noise.",
+      "photoIds": []
+    }
+  ]
+}
+```
+
+`devices` requires 1–10 entries with unique `clientDeviceId`s (the same
+bound FS14 enforces — this endpoint can never send FS14 more devices
+than FS14 itself accepts). `originalDescription` is stored exactly as
+submitted — never trimmed, normalized, or rewritten. Any other field in
+the body (`companyId`, `customerId`, etc.) is silently stripped, the
+same way `POST /auth/register` handles it: the service layer only ever
+reads `req.auth.companyId`/`req.auth.userId` for identity, never
+anything from the request body.
+
+Response `201` (first successful creation) or `200` (idempotent replay
+of an already-completed submission — see "Idempotency" below):
+
+```json
+{
+  "data": {
+    "requestId": "...",
+    "reference": "SR-7K9XQAB2",
+    "status": "SUBMITTED",
+    "devices": [
+      {
+        "clientDeviceId": "device-1",
+        "label": "Refrigerator",
+        "brand": "Acme",
+        "model": "X100",
+        "originalDescription": "Not cooling properly and making a buzzing noise."
+      }
+    ]
+  }
+}
+```
+
+**The response never includes AI analysis, analysis metadata, or any
+other internal field.** That data is persisted (see "Gemini
+integration" below) but is a staff-facing concern for a future,
+separately-authorized detail endpoint — not something this customer
+creation endpoint, or any endpoint in this task, exposes. `reference`
+is a random, server-generated, human-readable code (never client-
+supplied, never a sequential/predictable counter).
+
+Errors: `VALIDATION_ERROR` (400), `MISSING_IDEMPOTENCY_KEY` /
+`INVALID_IDEMPOTENCY_KEY` (400 — header absent or outside
+`[A-Za-z0-9_-]{1,200}`), `FORBIDDEN` (403 — authenticated but not a
+`CUSTOMER`), `PHOTO_NOT_AVAILABLE` (503 — see "Photo attachments"
+below), `IDEMPOTENCY_IN_PROGRESS` / `IDEMPOTENCY_CONFLICT` (409 — see
+"Idempotency"), `RATE_LIMITED` (429), `CSRF_ORIGIN_REJECTED` (403),
+`REQUEST_CREATION_FAILED` (500 — persistence failed after a successful
+Gemini call; safe to retry with the same Idempotency-Key).
+
+### Photo attachments — blocked pending FS13
+
+FS13 (photo/upload) **does not exist anywhere in this repository** —
+no model, no ownership contract, nothing to verify a `photoId` against.
+Accepting one anyway would mean trusting a client-supplied identifier
+with no way to confirm it belongs to this customer/company — exactly
+the "attach another customer's photo by guessing an ID" hole this
+endpoint is required to prevent. So rather than invent a photo/ownership
+architecture or silently accept unverified IDs, **any device with a
+non-empty `photoIds` array is rejected with `503
+PHOTO_NOT_AVAILABLE`, and nothing is created.** `photoIds: []` (or
+omitted) works today. When FS13 ships, this becomes a real ownership
+check (`photo.companyId`/`photo.customerId` cross-checked against
+`req.auth`, the same pattern used everywhere else in this codebase) —
+not a redesign.
+
+### Gemini integration (FS14)
+
+`analyzeDevices()` is called exactly once per new submission (never on
+an idempotent replay — see below), after the photo check and the
+idempotency reservation, before the database transaction. The mapping
+is `clientDeviceId`/`originalDescription` straight through, with
+`label`/`brand`/`model` combined into FS14's `equipment` input. A
+Gemini failure (timeout, quota, provider error, malformed output) never
+prevents the request from being saved — the affected device's stored
+`analysisMetadata.status` becomes `FAILED`/`UNAVAILABLE` with its
+`errorCode`, and `analysis` is `null`. There is no retry and no fallback
+model here either — this endpoint just consumes FS14's own guarantee of
+that.
+
+### Idempotency
+
+Every submission requires an `Idempotency-Key` header. The reservation
+identifying "one submission" is scoped to **(companyId, customerId,
+Idempotency-Key)** — never the key alone — so two different customers
+(even in the same company) can use the identical key value
+independently, and reusing a key later with the exact same payload from
+the exact same customer returns the original result instead of creating
+a duplicate.
+
+- **Same key, same payload** → `200` with the original request, no
+  second Gemini call, no second document created. "Same payload" is
+  checked via a SHA-256 fingerprint of a canonicalized request shape
+  (devices sorted by `clientDeviceId`, each device's `photoIds` sorted)
+  — the fingerprint is stored, the raw request content never is.
+- **Same key, different payload** → `409 IDEMPOTENCY_CONFLICT`. Nothing
+  is created.
+- **Same key, request still in flight** (a genuinely concurrent
+  duplicate) → `409 IDEMPOTENCY_IN_PROGRESS`. Only one concurrent
+  request ever becomes the owner and calls Gemini; the loser never does.
+- **Lost response** (the first attempt actually succeeded but the
+  client never saw the `201`) — a retry with the same key/payload finds
+  the completed reservation and returns `200` with the already-created
+  request, exactly like the "same key, same payload" case above.
+
+The reservation record itself never holds request content — no address,
+phone, description, or Gemini prompt/response, only the fingerprint hash
+and enough metadata to reconcile a retry. An abandoned reservation (the
+process crashed between reserving and completing) self-heals: a
+definitively `FAILED` reservation (persistence failed after Gemini ran)
+is immediately reclaimable by the next retry, and a reservation stuck
+`IN_PROGRESS` (the process crashed before even reaching that point)
+becomes reclaimable after a bounded cleanup window. A completed
+reservation is kept substantially longer so a legitimately slow retry
+still finds its result.
+
+Creating the request and completing its idempotency reservation happen
+in a single MongoDB transaction — both commit together or neither does,
+which is what makes "crashed between creating the request and marking
+the reservation complete" recoverable without ever risking a duplicate
+request on retry, rather than merely best-effort.
+
+### Rate limiting
+
+A per-customer submission throttle, reusing the same MongoDB-backed
+primitive as everything else (`recordAttempt()`), keyed on
+`requests:create:user:<userId>` — separate from FS14's own **global**
+Gemini throttle. The two exist for different reasons: FS14's protects
+the one shared provider quota from being exhausted by anyone; this one
+stops a single customer from being the one who exhausts it. Checked
+before the idempotency reservation, so a throttled call never reserves
+a key or reaches Gemini.
 
 ## Endpoints
 

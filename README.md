@@ -31,6 +31,8 @@ apps/api/           the entire application (package.json, tsconfig, lockfile)
       companies/      Company model
       ai/             Gemini device analysis service (analyzeDevices()) —
                        internal only, no HTTP route; see docs/api.md
+      requests/       POST /requests — validated multi-device service
+                       request creation, idempotency, FS14 integration
       health/         liveness check
   tests/             vitest + supertest + mongodb-memory-server
 docs/                API and architecture documentation
@@ -73,6 +75,8 @@ cp .env.example .env
 | `GEMINI_TIMEOUT_MS` | no | `15000` | bounded timeout for the Gemini call, ms |
 | `GEMINI_RATE_LIMIT_MAX_ATTEMPTS` | no | `5` | Gemini throttle, single global bucket |
 | `GEMINI_RATE_LIMIT_WINDOW_MS` | no | `60000` | Gemini throttle window, ms |
+| `REQUEST_CREATE_MAX_ATTEMPTS_PER_USER` | no | `20` | `POST /requests` throttle, per customer |
+| `REQUEST_CREATE_WINDOW_MS` | no | `3600000` | `POST /requests` throttle window, ms (1 hour) |
 
 Startup fails fast with a clear error message if required variables are
 missing or invalid (see `src/config/env.ts`). See
@@ -104,8 +108,10 @@ Run from `apps/api/`:
 - `pnpm dev` — start the dev server with hot reload
 - `pnpm build` — compile TypeScript to `dist/`
 - `pnpm typecheck` — type-check `src/` and `tests/`
-- `pnpm test` — run the vitest suite (spins up an in-memory MongoDB via
-  `mongodb-memory-server`; no real database or `.env` needed)
+- `pnpm test` — run the vitest suite (spins up an in-memory MongoDB
+  **replica set** via `mongodb-memory-server`, required for the real
+  multi-document transaction `POST /requests` uses; no real database or
+  `.env` needed)
 - `pnpm start` — run the compiled build (`dist/server.js`)
 
 ## Notes
@@ -123,8 +129,13 @@ Run from `apps/api/`:
 - Gemini device analysis (FS14, `analyzeDevices()` in
   `src/modules/ai/`) is implemented as an internal service, not an HTTP
   endpoint — see [docs/api.md](docs/api.md) "AI device analysis (FS14)".
-  It's meant to be called by the future `POST /requests` (FS15, not yet
-  implemented) before a service request is persisted.
+- `POST /api/v1/requests` (FS15) — customer-only, idempotent, multi-device
+  service request creation, calling FS14 before persisting — see
+  [docs/api.md](docs/api.md) "Service requests (FS15)". Photo attachments
+  (`photoIds`) are rejected with `503 PHOTO_NOT_AVAILABLE`: FS13
+  (photo/upload) doesn't exist anywhere in this repository yet, and
+  accepting an unverified photo reference would be an ownership hole, not
+  a feature.
 - There is no lint tooling configured in this repository yet (no ESLint
-  config/script exists) — setting one up is out of scope for FS02/FS04/FS14.
+  config/script exists) — setting one up is out of scope for FS02/FS04/FS14/FS15.
 - Logs never include secrets, tokens, cookies, or raw request bodies.
