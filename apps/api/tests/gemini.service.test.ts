@@ -345,16 +345,26 @@ describe("analyzeDevices — secret and log safety", () => {
 });
 
 describe("analyzeDevices — no Service Request persistence", () => {
-  it("touches no request/device persistence collection — only the shared throttle state", async () => {
+  it("writes to no request/device collection — only the shared throttle state changes", async () => {
     const devices: DeviceInput[] = [{ clientDeviceId: "dev-1", originalDescription: "desc" }];
     mockFetchResolving(geminiHttpResponse(JSON.stringify(validOutputFor(devices))));
 
+    // Document *counts*, not collection existence: FS15 legitimately owns
+    // a `servicerequests` collection now, so the only thing that still
+    // proves FS14 itself persists nothing is that calling it never adds
+    // documents to any request/device-shaped collection.
+    const collections = await mongoose.connection.db!.listCollections().toArray();
+    const relevant = collections.map((c) => c.name).filter((name) => /request|device/i.test(name));
+    const countsBefore = await Promise.all(
+      relevant.map((name) => mongoose.connection.db!.collection(name).countDocuments())
+    );
+
     await analyzeDevices({ devices });
 
-    const collections = await mongoose.connection.db!.listCollections().toArray();
-    const names = collections.map((c) => c.name.toLowerCase());
-    expect(names.some((name) => name.includes("request"))).toBe(false);
-    expect(names.some((name) => name.includes("device"))).toBe(false);
+    const countsAfter = await Promise.all(
+      relevant.map((name) => mongoose.connection.db!.collection(name).countDocuments())
+    );
+    expect(countsAfter).toEqual(countsBefore);
   });
 });
 

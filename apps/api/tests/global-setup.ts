@@ -1,4 +1,4 @@
-import { MongoMemoryServer } from "mongodb-memory-server";
+import { MongoMemoryReplSet } from "mongodb-memory-server";
 import { Types } from "mongoose";
 
 /**
@@ -35,8 +35,15 @@ export default async function globalSetup() {
   process.env.GEMINI_TIMEOUT_MS = "5000";
   process.env.GEMINI_RATE_LIMIT_MAX_ATTEMPTS = "3";
   process.env.GEMINI_RATE_LIMIT_WINDOW_MS = "60000";
+  process.env.REQUEST_CREATE_MAX_ATTEMPTS_PER_USER = "20";
+  process.env.REQUEST_CREATE_WINDOW_MS = "3600000";
 
-  const mongo = await MongoMemoryServer.create();
+  // A single-node replica set, not a standalone mongod — FS15's request
+  // creation needs a real multi-document transaction (ServiceRequest +
+  // idempotency-completion), and MongoDB transactions require a replica
+  // set even for local/test use. A standalone instance would silently
+  // make `session.withTransaction()` unavailable and mask that in tests.
+  const mongo = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   process.env.MONGODB_URI = mongo.getUri("fs-api-test");
 
   return async () => {
