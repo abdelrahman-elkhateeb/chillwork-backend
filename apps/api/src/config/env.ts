@@ -50,6 +50,26 @@ const envSchema = z.object({
   // a stricter bucket to) — per-IP only. See docs/api.md "Throttling".
   AUTH_REGISTER_MAX_ATTEMPTS_PER_IP: z.coerce.number().int().positive().default(10),
   AUTH_REGISTER_WINDOW_MS: z.coerce.number().int().positive().default(60 * 60 * 1000),
+
+  // Gemini device analysis (FS14) -------------------------------------------
+  // No default, ever — an absent key must fail the *specific* analysis
+  // call safely (see modules/ai/gemini.service.ts), not crash the whole
+  // app at startup (health/auth must keep working even before this
+  // feature is provisioned) and never fall back to a fake/placeholder key.
+  GEMINI_API_KEY: z.string().optional(),
+  // A single, fixed model — see docs/api.md "Gemini model selection" for
+  // the free-tier verification source/date. No fallback model is ever
+  // configured; a failure of this model is a controlled failure, not a
+  // trigger to try a different (possibly paid) one.
+  GEMINI_MODEL: z.string().min(1).default("gemini-3.8-flash"),
+  GEMINI_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
+  // Shared across all callers/instances via the existing MongoDB-backed
+  // throttle primitive (see modules/auth/auth-throttle.model.ts) — this
+  // protects the single free-tier quota itself, not any one caller, so
+  // the default is deliberately conservative relative to typical free-tier
+  // per-minute limits.
+  GEMINI_RATE_LIMIT_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
+  GEMINI_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
 });
 
 type RawEnv = z.infer<typeof envSchema>;
