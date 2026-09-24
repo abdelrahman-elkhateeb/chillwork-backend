@@ -1,8 +1,17 @@
+import { createHash } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 import { success } from "../../lib/envelope.js";
 import { HttpError } from "../../lib/http-error.js";
 import type { UserDocument } from "../users/user.model.js";
-import { checkLoginThrottle, checkRegisterThrottle, login, refresh, register, revokeCurrentSession } from "./auth.service.js";
+import {
+  checkLoginThrottle,
+  checkRegisterThrottle,
+  login,
+  refresh,
+  register,
+  revokeCurrentSession,
+  type AuthResult,
+} from "./auth.service.js";
 import { clearAuthCookies, readAuthCookies, setAuthCookies } from "./auth.cookies.js";
 import { loginSchema, registerSchema } from "./auth.schemas.js";
 import { hashRefreshToken } from "./auth.tokens.js";
@@ -46,14 +55,60 @@ export async function postRegister(req: Request, res: Response, next: NextFuncti
   }
 }
 
+/**
+ * Privacy-preserving correlation handle for logs — the same SHA-256
+ * approach the login throttle buckets already key on (see
+ * auth.service.ts's hashThrottleIdentifier), reused here so a raw email
+ * address never lands in plaintext in server logs.
+ */
+function hashForLog(value: string): string {
+  return createHash("sha256").update(value.toLowerCase().trim()).digest("hex");
+}
+
+type LoginLogEvent =
+  | { outcome: "success"; requestId: string; ip: string; emailHash: string; userId: string; companyId: string }
+  | { outcome: "failure"; requestId: string; ip: string; emailHash: string };
+
+/**
+ * Minimal structured login event (FS05) — deliberately not a general
+ * audit-log subsystem. Only ever emitted around the actual
+ * credential-verification call (never for request-validation or
+ * throttling rejections, which aren't login attempts against a real
+ * password), so `userId`/`companyId` are only ever included on success,
+ * when they're genuinely known — a failed attempt never has a user
+ * identity manufactured for it. Never logs the email itself, the
+ * password, or any token.
+ */
+function logLoginEvent(event: LoginLogEvent): void {
+  const log = event.outcome === "success" ? console.info : console.warn;
+  log({ event: "auth.login", ...event });
+}
+
 export async function postLogin(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const input = loginSchema.parse(req.body);
     const ip = req.ip ?? "unknown";
+    const requestId = res.locals.requestId;
+    const emailHash = hashForLog(input.email);
 
     await checkLoginThrottle(input.email, ip);
 
-    const result = await login(input.email, input.password);
+    let result: AuthResult;
+    try {
+      result = await login(input.email, input.password);
+    } catch (error) {
+      logLoginEvent({ outcome: "failure", requestId, ip, emailHash });
+      throw error;
+    }
+
+    logLoginEvent({
+      outcome: "success",
+      requestId,
+      ip,
+      emailHash,
+      userId: result.user._id.toString(),
+      companyId: result.user.companyId.toString(),
+    });
 
     setAuthCookies(res, {
       accessToken: result.accessToken,
@@ -73,6 +128,18 @@ export async function postLogin(req: Request, res: Response, next: NextFunction)
   } catch (error) {
     next(error);
   }
+}
+
+/**
+ * Session restoration (FS05): the frontend calls this after a browser
+ * refresh to re-derive "who is logged in" purely from the access/refresh
+ * cookies, without ever storing a token itself. Identity comes entirely
+ * from `req.auth`, set by the `authenticate` middleware after it
+ * re-validates the session/user/company server-side — never from any
+ * client-supplied id.
+ */
+export function getMe(req: Request, res: Response): void {
+  res.status(200).json(success({ user: toSafeUser(req.auth!.user) }));
 }
 
 export async function postRefresh(req: Request, res: Response, next: NextFunction): Promise<void> {
