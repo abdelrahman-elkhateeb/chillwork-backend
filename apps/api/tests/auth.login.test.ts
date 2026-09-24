@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import { Session } from "../src/modules/auth/session.model.js";
 import {
@@ -31,7 +31,7 @@ describe("POST /api/v1/auth/login", () => {
     expect(sessions[0]?.revokedAt).toBeNull();
   });
 
-  it("rejects an unknown email and a wrong password identically", async () => {
+  it("rejects an unknown email and a wrong password identically, and creates no session", async () => {
     const company = await createCompany();
     await createUser(company._id, { email: "bob@example.com" });
 
@@ -48,9 +48,13 @@ describe("POST /api/v1/auth/login", () => {
     expect(unknown.body.error.code).toBe("INVALID_CREDENTIALS");
     expect(wrongPassword.status).toBe(401);
     expect(wrongPassword.body.error.code).toBe("INVALID_CREDENTIALS");
+
+    expect(await Session.countDocuments({})).toBe(0);
+    expect(JSON.stringify(unknown.body)).not.toMatch(/passwordHash|scrypt:/i);
+    expect(JSON.stringify(wrongPassword.body)).not.toMatch(/passwordHash|scrypt:/i);
   });
 
-  it("rejects login for an inactive user without revealing why", async () => {
+  it("rejects login for an inactive user without revealing why, and creates no session", async () => {
     const company = await createCompany();
     await createUser(company._id, { email: "inactive@example.com", isActive: false });
 
@@ -61,6 +65,34 @@ describe("POST /api/v1/auth/login", () => {
 
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe("INVALID_CREDENTIALS");
+    expect(await Session.countDocuments({})).toBe(0);
+  });
+
+  it("rejects login for a user in an inactive company without revealing why, and creates no session", async () => {
+    const company = await createCompany({ isActive: false });
+    await createUser(company._id, { email: "inactive-company@example.com" });
+
+    const res = await sameOriginRequest(app, "post", "/api/v1/auth/login").send({
+      email: "inactive-company@example.com",
+      password: PASSWORD,
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("INVALID_CREDENTIALS");
+    expect(await Session.countDocuments({})).toBe(0);
+  });
+
+  it.each(["CUSTOMER", "ADMIN", "TECHNICIAN"] as const)("lets a %s user log in and returns their server-side role", async (role) => {
+    const company = await createCompany();
+    await createUser(company._id, { email: `${role.toLowerCase()}@example.com`, role });
+
+    const res = await sameOriginRequest(app, "post", "/api/v1/auth/login").send({
+      email: `${role.toLowerCase()}@example.com`,
+      password: PASSWORD,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.user.role).toBe(role);
   });
 
   it("sets HttpOnly cookies and never returns the refresh token in JSON", async () => {
@@ -146,5 +178,64 @@ describe("login throttling", () => {
 
     expect(lastStatus).toBe(429);
     expect((lastBody as { error: { code: string } }).error.code).toBe("RATE_LIMITED");
+  });
+});
+
+describe("login event logging", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("logs a safe success event with no credentials, tokens, or raw email", async () => {
+    const app = createApp();
+    const company = await createCompany();
+    const user = await createUser(company._id, { email: "logged-success@example.com" });
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    await sameOriginRequest(app, "post", "/api/v1/auth/login").send({
+      email: "logged-success@example.com",
+      password: PASSWORD,
+    });
+
+    expect(infoSpy).toHaveBeenCalledTimes(1);
+    const [event] = infoSpy.mock.calls[0] as [Record<string, unknown>];
+    expect(event).toMatchObject({ event: "auth.login", outcome: "success", userId: user._id.toString() });
+
+    const logged = JSON.stringify(event);
+    expect(logged).not.toContain(PASSWORD);
+    expect(logged).not.toContain("logged-success@example.com");
+    expect(logged).not.toMatch(/passwordHash|scrypt:|refresh_token|access_token/i);
+  });
+
+  it("logs a safe failure event with no credentials, tokens, raw email, or manufactured identity", async () => {
+    const app = createApp();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await sameOriginRequest(app, "post", "/api/v1/auth/login").send({
+      email: "never-registered@example.com",
+      password: "whatever-they-typed",
+    });
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const [event] = warnSpy.mock.calls[0] as [Record<string, unknown>];
+    expect(event).toMatchObject({ event: "auth.login", outcome: "failure" });
+    expect(event).not.toHaveProperty("userId");
+    expect(event).not.toHaveProperty("companyId");
+
+    const logged = JSON.stringify(event);
+    expect(logged).not.toContain("whatever-they-typed");
+    expect(logged).not.toContain("never-registered@example.com");
+  });
+
+  it("does not log a login event for a request-validation failure (no credential check ran)", async () => {
+    const app = createApp();
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const res = await sameOriginRequest(app, "post", "/api/v1/auth/login").send({ email: "not-an-email" });
+
+    expect(res.status).toBe(400);
+    expect(infoSpy).not.toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 });
