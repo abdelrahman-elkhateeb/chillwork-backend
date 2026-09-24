@@ -131,6 +131,17 @@ The rolling expiry is always `min(now + 7 days, absoluteExpiresAt)` —
 sequence of refreshes can keep a session alive past 30 days from its
 original login.
 
+### User roles
+
+Every `User` has one of three roles (`User.role`, required, no schema
+default): `CUSTOMER`, `ADMIN`, `TECHNICIAN`. `role` is returned by both
+`POST /auth/login` and `GET /auth/me` so the frontend can select the
+correct workspace — but it is always read from the database, never from
+the client. Public registration (FS04) is currently the only path that
+creates users, and it always assigns `CUSTOMER`; there is no public or
+authenticated path yet that can create an `ADMIN` or `TECHNICIAN`
+account (out of scope until that's explicitly built).
+
 ### Cookies
 
 | Cookie          | Contents                          | Path              | Notes |
@@ -265,16 +276,79 @@ Response `200` sets `access_token`/`refresh_token` cookies and returns:
 ```json
 {
   "data": {
-    "user": { "id": "...", "email": "...", "name": "...", "companyId": "..." },
+    "user": {
+      "id": "...",
+      "email": "...",
+      "name": "...",
+      "phone": "...",
+      "role": "CUSTOMER",
+      "companyId": "..."
+    },
     "session": { "id": "...", "expiresAt": "2026-09-29T00:00:00.000Z" }
   }
 }
 ```
 
+`role` is always the server-side value from the `User` document (see
+[User roles](#user-roles)) — the frontend uses it to pick the correct
+workspace, but the backend never trusts a role from the client.
+
 Errors: `VALIDATION_ERROR` (400), `INVALID_CREDENTIALS` (401 — returned
 identically for an unknown email, a wrong password, or a deactivated
 user/company, so login can't be used to enumerate accounts),
 `RATE_LIMITED` (429), `CSRF_ORIGIN_REJECTED` (403).
+
+A minimal structured event is logged for every credential check (not for
+request-validation or throttling rejections, which never reach a real
+password comparison): `{ event: "auth.login", outcome: "success" |
+"failure", requestId, ip, emailHash, userId?, companyId? }`. `emailHash`
+is a SHA-256 hash of the normalized email — the same technique the
+throttle buckets already use — so a raw address never appears in
+plaintext in server logs. `userId`/`companyId` are only ever attached on
+success, when they're genuinely known; a failed attempt never has an
+identity manufactured for it, whether or not the email belongs to a real
+account. The password, hashes, and tokens are never logged.
+
+#### `GET /api/v1/auth/me`
+
+Requires authentication (the existing `authenticate` middleware — same
+server-side session/user/company revalidation as every other protected
+request, see [Session architecture](#session-architecture)). This is what
+lets the frontend restore its authenticated state after a browser
+refresh, without ever storing a token itself:
+
+```
+POST /auth/login → cookies set
+        ⋮ (browser refresh — in-memory frontend state is gone)
+GET /auth/me → cookies sent automatically → same user restored
+```
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "user": {
+      "id": "...",
+      "email": "...",
+      "name": "...",
+      "phone": "...",
+      "role": "CUSTOMER",
+      "companyId": "..."
+    }
+  }
+}
+```
+
+The identity returned is always `req.auth.user` as established by the
+`authenticate` middleware from the verified session — never from a query
+parameter, request body, or any other client-supplied value. There is no
+authenticated identity for `/me` to trust other than the one the cookie
+chain proves.
+
+Errors: `UNAUTHORIZED` (401 — missing/invalid JWT, inactive user, or
+invalid company membership), `SESSION_REVOKED` (401), `SESSION_EXPIRED`
+(401) — the same set `authenticate` produces for any protected route.
 
 #### `POST /api/v1/auth/refresh`
 
