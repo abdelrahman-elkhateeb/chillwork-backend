@@ -499,8 +499,9 @@ bucket returns `429 RATE_LIMITED`.
 `CSRF_ORIGIN_REJECTED` (FS02), `CONFLICT`, `DEMO_COMPANY_UNAVAILABLE`
 (FS04), `MISSING_IDEMPOTENCY_KEY`, `INVALID_IDEMPOTENCY_KEY`,
 `IDEMPOTENCY_IN_PROGRESS`, `IDEMPOTENCY_CONFLICT`, `PHOTO_NOT_AVAILABLE`,
-`REQUEST_CREATION_FAILED` (FS15) — all follow the standard error
-envelope above.
+`REQUEST_CREATION_FAILED` (FS15), `SCHEDULE_CONFLICT`,
+`REQUEST_NOT_SCHEDULABLE`, `DEVICE_ALREADY_SCHEDULED` (FS18) — all follow the
+standard error envelope above.
 
 ### Assumptions (OPEN DECISIONs resolved with a default)
 
@@ -821,6 +822,99 @@ the one shared provider quota from being exhausted by anyone; this one
 stops a single customer from being the one who exhausts it. Checked
 before the idempotency reservation, so a throttled call never reserves
 a key or reaches Gemini.
+
+## Visit scheduling (FS18)
+
+Admin-only (`ADMIN` role; `CUSTOMER`/`TECHNICIAN` get `403 FORBIDDEN`). Company and
+acting user come only from `req.auth`; a `companyId` in a body is ignored.
+
+> **Dependency note:** FS09 and FS17 do not exist in this repository (no visit
+> model, no request lifecycle beyond `SUBMITTED`, no company timezone). FS18
+> therefore adds only the minimum it needs and does not invent a lifecycle;
+> the assumptions are listed at the end of this section.
+
+### `POST /api/v1/admin/requests/:id/visits`
+
+```json
+{
+  "technicianId": "64b0...",
+  "startAt": "2026-09-27T10:00:00+03:00",
+  "endAt": "2026-09-27T11:30:00+03:00",
+  "deviceIds": ["device-1", "device-2"],
+  "workTypes": ["INSPECTION", "REPAIR"]
+}
+```
+
+`workTypes` is optional (default `["INSPECTION"]`); one visit may carry both
+inspection and repair. `deviceIds` are the request's `clientDeviceId`s (request
+devices are embedded and have no other id) - 1 to 10, unique, all on this request.
+**One visit covers all listed devices.** A device may be in only one active visit.
+
+`201` returns the visit in the standard envelope:
+
+```json
+{ "data": { "visitId": "...", "requestId": "...", "technicianId": "...",
+  "startAt": "2026-09-27T07:00:00.000Z", "endAt": "2026-09-27T08:30:00.000Z",
+  "timezone": "Africa/Cairo", "deviceIds": ["device-1","device-2"],
+  "workTypes": ["INSPECTION","REPAIR"], "status": "SCHEDULED" } }
+```
+
+Errors: `VALIDATION_ERROR` 400 (bad times/devices; an unavailable technician gets one
+uniform `fieldErrors.technicianId` whether it is missing, in another company,
+inactive, or not a `TECHNICIAN`), `NOT_FOUND` 404 (request missing or in another
+company), `REQUEST_NOT_SCHEDULABLE` 409, `DEVICE_ALREADY_SCHEDULED` 409,
+`SCHEDULE_CONFLICT` 409.
+
+### `GET /api/v1/admin/technicians/:id/availability?from=&to=`
+
+Returns the technician's **busy** intervals (active visits only) intersecting the
+window: `{ technicianId, timezone, from, to, busy: [{ visitId, startAt, endAt }] }`.
+Only times are returned - no customer, request or device data. The technician must
+be an active `TECHNICIAN` of the caller's company; anything else is `404`. `to` must
+be after `from` and the window at most 31 days.
+
+### Time handling
+
+Timestamps must be ISO-8601 **with an explicit offset** (`Z` or `+03:00`); an
+offset-less local time is rejected as ambiguous rather than guessed. They are stored
+as UTC instants and returned as UTC ISO strings. `Company.timezone` (IANA name,
+default `UTC`, validated) is snapshotted onto each visit and returned so clients can
+render in the company's zone. Duration must be 15 minutes - 8 hours (constants in
+`visit.constants.ts`).
+
+### Overlap rules
+
+Intervals are half-open `[startAt, endAt)`: 10:00-11:00 and 11:00-12:00 do not
+conflict; 10:00-11:00 and 10:59-12:00 do. Only `SCHEDULED`/`IN_PROGRESS` visits
+count (an allow-list, not "not cancelled"), so a `CANCELLED` visit frees the time.
+
+### Scheduling concurrency
+
+MongoDB has no range-exclusion constraint, and a transaction that reads for
+overlap and then inserts does **not** stop two concurrent bookings: under snapshot
+isolation both read "no conflict" and both commit (verified: with the lock below
+removed, six concurrent overlapping bookings all returned `201`).
+
+Instead, each booking's transaction first `$inc`s a lock document per resource it
+touches - `technician:<id>` and `request:<id>` (`ScheduleLock`, unique per
+company+key). Two bookings for the same technician therefore write the same
+document; MongoDB aborts one with a transient write conflict, the driver retries it
+on a fresh snapshot, and its overlap check then sees the winner's committed visit
+and answers `409 SCHEDULE_CONFLICT`. This preserves arbitrary start/end times (no
+fixed slots), holds across processes and serverless instances, and uses no
+process memory. Non-overlapping concurrent bookings still all succeed. Trade-off:
+bookings for one technician (or request) are serialized.
+
+The visit and its two events (`VISIT_SCHEDULED`, `TECHNICIAN_ASSIGNED`, recorded in
+`VisitEvent` with the acting admin) are written in the same transaction.
+
+### Assumptions (no FS09/FS17 to defer to)
+
+- Only `SUBMITTED` requests are schedulable; scheduling does not change request status.
+- Visit statuses `SCHEDULED/IN_PROGRESS/COMPLETED/CANCELLED` exist; only `SCHEDULED`
+  is created today. There is no cancel/complete endpoint yet - a future one only
+  needs to set the status (the conflict check is status-based).
+- No business-hours, past-date, or lookahead rules were specified, so none are enforced.
 
 ## Endpoints
 

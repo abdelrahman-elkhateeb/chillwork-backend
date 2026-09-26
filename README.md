@@ -33,6 +33,8 @@ apps/api/           the entire application (package.json, tsconfig, lockfile)
                        internal only, no HTTP route; see docs/api.md
       requests/       POST /requests — validated multi-device service
                        request creation, idempotency, FS14 integration
+      visits/         admin visit scheduling + technician availability,
+                       lock-based conflict prevention (FS18)
       health/         liveness check
   tests/             vitest + supertest + mongodb-memory-server
 docs/                API and architecture documentation
@@ -136,6 +138,9 @@ Run from `apps/api/`:
   (photo/upload) doesn't exist anywhere in this repository yet, and
   accepting an unverified photo reference would be an ownership hole, not
   a feature.
+- Admin visit scheduling (FS18) - see [docs/api.md](docs/api.md) "Visit
+  scheduling (FS18)". FS09/FS17 do not exist in this repo, so it adds only
+  what it needs (`Company.timezone`, visit models) and documents its assumptions.
 - There is no lint tooling configured in this repository yet (no ESLint
   config/script exists) — setting one up is out of scope for FS02/FS04/FS14/FS15.
 - Logs never include secrets, tokens, cookies, or raw request bodies.
