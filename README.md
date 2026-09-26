@@ -35,6 +35,7 @@ apps/api/           the entire application (package.json, tsconfig, lockfile)
                        request creation, idempotency, FS14 integration
       visits/         admin visit scheduling + technician availability,
                        lock-based conflict prevention (FS18)
+      technician/     technician-only read access to own assigned visits (FS19)
       health/         liveness check
   tests/             vitest + supertest + mongodb-memory-server
 docs/                API and architecture documentation
@@ -141,6 +142,9 @@ Run from `apps/api/`:
 - Admin visit scheduling (FS18) - see [docs/api.md](docs/api.md) "Visit
   scheduling (FS18)". FS09/FS17 do not exist in this repo, so it adds only
   what it needs (`Company.timezone`, visit models) and documents its assumptions.
+- Technician visit read access (FS19, `GET /technician/visits[/:id]`) - see
+  [docs/api.md](docs/api.md). Only the read half exists: photos/evidence wait on FS13,
+  which does not exist in this repo, and no technician actions exist yet.
 - There is no lint tooling configured in this repository yet (no ESLint
   config/script exists) — setting one up is out of scope for FS02/FS04/FS14/FS15.
 - Logs never include secrets, tokens, cookies, or raw request bodies.

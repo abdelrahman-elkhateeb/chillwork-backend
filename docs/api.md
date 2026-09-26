@@ -916,6 +916,96 @@ The visit and its two events (`VISIT_SCHEDULED`, `TECHNICIAN_ASSIGNED`, recorded
   needs to set the status (the conflict check is status-based).
 - No business-hours, past-date, or lookahead rules were specified, so none are enforced.
 
+## Technician visit access (FS19 - read half)
+
+Technician-only (`TECHNICIAN` role; `CUSTOMER`/`ADMIN` get `403 FORBIDDEN`). Both
+endpoints are read-only `GET`s. The technician is always `req.auth.userId` within
+`req.auth.companyId`; the client only ever names a visit. A `technicianId` or
+`companyId` query parameter is rejected with `VALIDATION_ERROR` (unrecognized
+filters are never silently ignored - see Pagination).
+
+> **Scope note:** this is only the read half of FS19. Photo/evidence access, technician
+> actions (edit/upload/collect/complete) and reassignment are not implemented.
+> FS13 (photo storage and ownership) does not exist in this repository, so no photo
+> endpoint, field or authorization exists; assignment-scoped photo access is deferred
+> until FS13 provides a real model.
+
+### `GET /api/v1/technician/visits`
+
+Query (all optional): `from`, `to` (ISO-8601 **with an explicit offset**, `Z` or
+`+03:00`; offset-less times are rejected; compared as UTC instants using FS18's
+half-open overlap: a visit is included if it ends after `from` and starts before
+`to`), `status` (`SCHEDULED`, `IN_PROGRESS`, `COMPLETED`, `CANCELLED`), `page`
+(default 1), `pageSize` (default 20, max 100; larger is rejected). With no `status`
+all statuses are returned; with no dates there is no date restriction. Results are
+ordered by `startAt` then id, so paging is deterministic.
+
+```json
+{
+  "data": [{
+    "id": "...", "requestReference": "SR-7K9XQAB2",
+    "startAt": "2026-09-27T07:00:00.000Z", "endAt": "2026-09-27T08:30:00.000Z",
+    "timezone": "Africa/Cairo", "status": "SCHEDULED", "workTypes": ["INSPECTION"],
+    "customer": { "name": "Jane Customer", "phone": "+15550001111" },
+    "address": "123 Main St",
+    "devices": [{ "clientDeviceId": "d1", "label": "Refrigerator", "brand": "Acme", "model": "X1" }],
+    "allowedActions": []
+  }],
+  "meta": { "page": 1, "pageSize": 20, "total": 1 }
+}
+```
+
+### `GET /api/v1/technician/visits/:id`
+
+The list fields plus, for each device **attached to this visit only** (not every device
+on the request):
+
+```json
+{ "clientDeviceId": "d1", "label": "Refrigerator", "brand": "Acme", "model": "X1",
+  "originalDescription": "exactly what the customer wrote",
+  "analysis": { "summary": "...", "possibleCauses": [], "missingInformation": [], "inspectionQuestions": [] },
+  "analysisStatus": "SUCCESS" }
+```
+
+`analysis` is `null` (never invented) when the AI analysis failed or was unavailable;
+`analysisStatus` is only `SUCCESS`, `FAILED` or `UNAVAILABLE`. The analysis is AI-generated
+assistance derived from customer text - treat it as advisory, not a diagnosis.
+`customer.phone` is the contact number the customer gave for this request.
+
+### Authorization
+
+Every lookup is scoped in the database by company **and** current technician:
+`Visit.findOne({ _id, companyId: req.auth.companyId, technicianId: req.auth.userId })`
+(`findAssignedVisit`). `Visit.technicianId` - the single current assignment - is the only
+authority; `VisitEvent` history is never consulted. A missing visit, another company's
+visit, a visit assigned to another technician, and a malformed id all return the same
+`404 NOT_FOUND` ("Visit not found"), so there is no existence oracle. The request,
+customer and devices are then derived from the authorized visit (company-scoped).
+Consequently, when a visit's `technicianId` changes from A to B, A gets `404` and B gets
+`200` on the very next request. A deactivated technician, a revoked session, or a user
+whose role is no longer `TECHNICIAN` is denied by the normal authentication/role checks.
+
+**For future technician mutations:** re-authorize from current state on every
+edit/upload/collect/complete - call `findAssignedVisit`, or better put the same
+`{ _id, companyId, technicianId, status }` filter inside the write itself so the check
+and the write are one atomic operation. A mutation that writes only another collection
+would not conflict with a concurrent reassignment, so it should also write the visit
+document (or take a `visit:<id>` `ScheduleLock`) first, like FS18's lock-first pattern.
+
+### Never returned to technicians
+
+Customer email, `customerId`, `companyId`, `technicianId`, `scheduledById`, the request's
+internal id, other technicians' assignments, other requests or devices, AI provider
+metadata (model, prompt version, timestamps, error codes), lock or idempotency data, and
+any financial data (none exists yet).
+
+### Index
+
+`{ companyId, technicianId, startAt }` was added to `Visit`. The FS18 index
+`{ companyId, technicianId, status, startAt, endAt }` cannot serve a query without a
+`status`, because `status` sits between the technician and `startAt` and the list would
+sort in memory. With a `status` the older index still applies.
+
 ## Endpoints
 
 ### `GET /api/v1/health`
