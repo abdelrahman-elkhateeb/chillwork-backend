@@ -26,10 +26,11 @@ function unique(prefix: string): string {
   return `${prefix}-${Date.now()}-${counter}`;
 }
 
-export async function createCompany(overrides: { name?: string; isActive?: boolean } = {}) {
+export async function createCompany(overrides: { name?: string; isActive?: boolean; timezone?: string } = {}) {
   return Company.create({
     name: overrides.name ?? unique("Acme"),
     isActive: overrides.isActive ?? true,
+    ...(overrides.timezone ? { timezone: overrides.timezone } : {}),
   });
 }
 
