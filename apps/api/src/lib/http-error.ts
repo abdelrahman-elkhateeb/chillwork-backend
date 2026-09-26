@@ -97,4 +97,20 @@ export class HttpError extends Error {
   static requestCreationFailed(message = "Unable to create the request, please try again"): HttpError {
     return new HttpError(500, "REQUEST_CREATION_FAILED", message);
   }
+
+  static validationFailed(message: string, fieldErrors: FieldErrors): HttpError {
+    return new HttpError(400, "VALIDATION_ERROR", message, fieldErrors);
+  }
+
+  static scheduleConflict(message = "The technician already has a visit overlapping this time"): HttpError {
+    return new HttpError(409, "SCHEDULE_CONFLICT", message);
+  }
+
+  static requestNotSchedulable(message = "This request cannot be scheduled in its current state"): HttpError {
+    return new HttpError(409, "REQUEST_NOT_SCHEDULABLE", message);
+  }
+
+  static deviceAlreadyScheduled(message = "One or more devices are already part of an active visit"): HttpError {
+    return new HttpError(409, "DEVICE_ALREADY_SCHEDULED", message);
+  }
 }
