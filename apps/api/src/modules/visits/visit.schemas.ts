@@ -11,7 +11,7 @@ import {
 } from "./visit.constants.js";
 
 /** Explicit-offset ISO-8601 string -> the corresponding UTC `Date`. */
-const instant = z
+export const instant = z
   .string()
   .regex(
     ISO_INSTANT_WITH_OFFSET,

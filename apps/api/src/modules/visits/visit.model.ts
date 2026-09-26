@@ -27,6 +27,10 @@ const visitSchema = new Schema(
 // Overlap/availability lookups: one technician's active visits in a window.
 visitSchema.index({ companyId: 1, technicianId: 1, status: 1, startAt: 1, endAt: 1 });
 visitSchema.index({ companyId: 1, requestId: 1, status: 1 });
+// FS19: a technician's own visits ordered by time when no status filter is
+// given. The index above cannot serve that (status sits between the
+// technician and startAt), so without this the list would sort in memory.
+visitSchema.index({ companyId: 1, technicianId: 1, startAt: 1 });
 
 export interface VisitDocument {
   _id: Types.ObjectId;
