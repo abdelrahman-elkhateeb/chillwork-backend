@@ -2,8 +2,10 @@ import type { Express } from "express";
 import { Types } from "mongoose";
 import request, { type Response, type Test } from "supertest";
 import { Company } from "../src/modules/companies/company.model.js";
+import { ServiceRequest } from "../src/modules/requests/request.model.js";
 import { hashPassword } from "../src/modules/users/password.js";
 import { User, type UserRole } from "../src/modules/users/user.model.js";
+import { Visit } from "../src/modules/visits/visit.model.js";
 
 export const PASSWORD = "Sup3r-Secret-Passw0rd!";
 
@@ -103,4 +105,82 @@ export function cookieHeader(cookies: Record<string, string | undefined>): strin
     .filter((entry): entry is [string, string] => entry[1] !== undefined)
     .map(([name, value]) => `${name}=${value}`)
     .join("; ");
+}
+
+/** Logs in and returns the auth cookies. */
+export async function loginAs(app: Express, email: string): Promise<Record<string, string>> {
+  const res = await sameOriginRequest(app, "post", "/api/v1/auth/login").send({ email, password: PASSWORD });
+  return parseSetCookies(res);
+}
+
+export interface TestRequestDevice {
+  clientDeviceId: string;
+  label?: string;
+  brand?: string | null;
+  model?: string | null;
+  originalDescription?: string;
+  analysis?: {
+    summary: string;
+    possibleCauses: string[];
+    missingInformation: string[];
+    inspectionQuestions: string[];
+  } | null;
+}
+
+/** A persisted ServiceRequest (no Gemini/HTTP involved), with per-device AI analysis if given. */
+export async function createServiceRequest(
+  companyId: unknown,
+  customerId: unknown,
+  devices: TestRequestDevice[] = [{ clientDeviceId: "d1" }]
+) {
+  return ServiceRequest.create({
+    companyId,
+    customerId,
+    reference: `SR-${unique("ref")}`.slice(0, 24),
+    status: "SUBMITTED",
+    address: "1 Main St",
+    contactPhone: "+15550001111",
+    devices: devices.map((device) => ({
+      clientDeviceId: device.clientDeviceId,
+      label: device.label ?? device.clientDeviceId,
+      brand: device.brand ?? null,
+      model: device.model ?? null,
+      originalDescription: device.originalDescription ?? `broken ${device.clientDeviceId}`,
+      analysis: device.analysis ?? null,
+      analysisMetadata: {
+        status: device.analysis ? "SUCCESS" : "UNAVAILABLE",
+        model: "internal-model-name",
+        promptVersion: "v-internal",
+        processedAt: new Date(),
+        errorCode: device.analysis ? null : "GEMINI_TIMEOUT",
+      },
+    })),
+  });
+}
+
+/** A persisted Visit inserted directly (bypasses scheduling), for read-side tests. */
+export async function createVisitDoc(overrides: {
+  companyId: unknown;
+  requestId: unknown;
+  technicianId: unknown;
+  scheduledById: unknown;
+  deviceIds?: string[];
+  startAt?: Date;
+  endAt?: Date;
+  status?: "SCHEDULED" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED";
+  workTypes?: Array<"INSPECTION" | "REPAIR">;
+}) {
+  const startAt = overrides.startAt ?? new Date("2030-01-15T10:00:00Z");
+  return Visit.create({
+    companyId: overrides.companyId,
+    requestId: overrides.requestId,
+    technicianId: overrides.technicianId,
+    scheduledById: overrides.scheduledById,
+    startAt,
+    endAt: overrides.endAt ?? new Date(startAt.getTime() + 60 * 60 * 1000),
+    timezone: "UTC",
+    deviceIds: overrides.deviceIds ?? ["d1"],
+    workTypes: overrides.workTypes ?? ["INSPECTION"],
+    status: overrides.status ?? "SCHEDULED",
+  });
 }
