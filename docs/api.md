@@ -492,7 +492,7 @@ resolution, the uniqueness check, and password hashing, so an
 over-the-limit request is rejected as cheaply as possible. Exceeding any
 bucket returns `429 RATE_LIMITED`.
 
-### Error codes introduced by FS02 / FS04 / FS15
+### Error codes introduced by FS02 / FS04 / FS15 / FS18 / FS23
 
 `INVALID_CREDENTIALS`, `SESSION_EXPIRED`, `SESSION_REVOKED`,
 `INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_REUSED`, `RATE_LIMITED`,
@@ -500,7 +500,9 @@ bucket returns `429 RATE_LIMITED`.
 (FS04), `MISSING_IDEMPOTENCY_KEY`, `INVALID_IDEMPOTENCY_KEY`,
 `IDEMPOTENCY_IN_PROGRESS`, `IDEMPOTENCY_CONFLICT`, `PHOTO_NOT_AVAILABLE`,
 `REQUEST_CREATION_FAILED` (FS15), `SCHEDULE_CONFLICT`,
-`REQUEST_NOT_SCHEDULABLE`, `DEVICE_ALREADY_SCHEDULED` (FS18) — all follow the
+`REQUEST_NOT_SCHEDULABLE`, `DEVICE_ALREADY_SCHEDULED` (FS18),
+`VISIT_STATUS_CONFLICT`, `VERSION_CONFLICT`, `WORK_RESULTS_INCOMPLETE`
+(FS23) — all follow the
 standard error envelope above.
 
 ### Assumptions (OPEN DECISIONs resolved with a default)
@@ -1005,6 +1007,127 @@ any financial data (none exists yet).
 `{ companyId, technicianId, status, startAt, endAt }` cannot serve a query without a
 `status`, because `status` sits between the technician and `startAt` and the list would
 sort in memory. With a `status` the older index still applies.
+
+## Technician work execution (FS23)
+
+Technician-only (`TECHNICIAN` role), same authorization chain as FS19:
+`authenticate` -> `requireRole("TECHNICIAN")` -> `findAssignedVisit` (company +
+**current** `Visit.technicianId`, re-read from the database on every call — never a
+cached/earlier fetch). All mutating routes below are also behind the
+[CSRF/origin guard](#csrforigin-protection).
+
+> **Dependency note:** there is no Quote/Approval model in this repository. FS23
+> therefore does not — and cannot — validate "approved work" or compute anything
+> billable. It records what a technician actually did, per device, using
+> `Visit.deviceIds` (the set an admin already assigned to the visit) as the closest
+> existing stand-in for "the work this visit covers." A later billing feature
+> reads this data; nothing here calculates money, and no photo/evidence handling
+> is included (FS13 still doesn't exist).
+
+### Visit lifecycle transitions
+
+No endpoint in this repository ever moved a `Visit` out of `SCHEDULED` before FS23.
+Work results require `IN_PROGRESS`, and immutability requires `COMPLETED` to be
+reachable, so FS23 adds the smallest necessary transitions — both technician-owned
+(the assigned technician starting/finishing their own visit), not a scheduling or
+reassignment feature:
+
+```http
+POST /api/v1/technician/visits/:id/start      (SCHEDULED -> IN_PROGRESS)
+POST /api/v1/technician/visits/:id/complete   (IN_PROGRESS -> COMPLETED)
+```
+
+`start` fails with `409 VISIT_STATUS_CONFLICT` unless the visit is currently
+`SCHEDULED`. `complete` fails the same way unless it is currently `IN_PROGRESS`,
+and additionally fails with `409 WORK_RESULTS_INCOMPLETE` unless every device in
+`Visit.deviceIds` has a recorded work result — `REPAIRED` and `FAILED` both count
+as resolved; there is no partial-completion override. Both responses are
+`{ "data": { "id": "...", "status": "IN_PROGRESS" | "COMPLETED" } }`, and both
+record a `VisitEvent` (`VISIT_STARTED` / `VISIT_COMPLETED`).
+
+### `PUT /api/v1/technician/visits/:visitId/work-results/:deviceId`
+
+`:deviceId` is the request device's `clientDeviceId` (there is no separate Device
+collection). The device must be in `Visit.deviceIds` *and* still present on the
+underlying `ServiceRequest`; either failure is the same `404` as an unassigned
+visit — a device that exists elsewhere is never distinguishable from one that
+doesn't exist at all. Rejected with `409 VISIT_STATUS_CONFLICT` unless the visit is
+currently `IN_PROGRESS`.
+
+```json
+{ "result": "REPAIRED", "version": 0 }
+```
+```json
+{ "result": "FAILED", "failureReason": "PART_UNAVAILABLE", "failureNote": "Compressor not in stock.", "version": 0 }
+```
+
+There is intentionally no third "no result" state — a repair that did not happen
+is a `FAILED` result with a structured `failureReason`, one of `PART_UNAVAILABLE`,
+`CUSTOMER_REFUSED`, `TOO_EXPENSIVE`, `TECHNICAL_ISSUE`, `OTHER` (an arbitrary
+string is rejected with `VALIDATION_ERROR`; `failureNote` is optional free text,
+max 1000 characters). `REPAIRED` never carries a `failureReason`/`failureNote` —
+if sent anyway, they're silently dropped, matching this repo's default
+unknown-key-stripping convention. **A failed repair is still preserved as a real
+result and still costs nothing** — FS23 has no cost/price/billable field at all;
+"costs zero" is simply the absence of any billing computation here, by design.
+
+**Versioning:** `version` is the version the caller last saw — `0` means "I
+believe no result exists yet for this device." Every accepted write increments
+the *stored* version by exactly one (`0 -> 1 -> 2 -> ...`) and returns the new
+value. A mismatch — a stale version, two concurrent writes racing from the same
+version, or a nonzero version against a device with no result yet — is always
+`409 VERSION_CONFLICT`, never a silently-lost update. This is a client-facing
+optimistic-concurrency field (`WorkResult.version`), unrelated to Mongoose's
+internal `__v`.
+
+Response: `{ "data": { "clientDeviceId": "...", "result": "REPAIRED", "failureReason": null, "failureNote": null, "version": 1 } }`.
+
+Editable only while the visit is `IN_PROGRESS`; once `COMPLETED`, results are
+immutable from the technician's perspective (there is no admin-override endpoint
+in this repository). Every write records a `VisitEvent`
+(`WORK_RESULT_RECORDED` the first time, `WORK_RESULT_UPDATED` after).
+
+### `GET /api/v1/technician/visits/:visitId/work-results`
+
+One entry per device in `Visit.deviceIds`, including devices with no result yet
+(`result: null`, `version: 0`) so a client can show what's still outstanding.
+
+```json
+{
+  "data": {
+    "visitId": "...",
+    "outcome": "PARTIALLY_REPAIRED",
+    "devices": [
+      { "clientDeviceId": "d1", "result": "REPAIRED", "failureReason": null, "failureNote": null, "version": 1 },
+      { "clientDeviceId": "d2", "result": "FAILED", "failureReason": "PART_UNAVAILABLE", "failureNote": null, "version": 1 }
+    ]
+  }
+}
+```
+
+`outcome` is `FULLY_REPAIRED`, `PARTIALLY_REPAIRED`, `NO_REPAIR`, or `null` — it is
+only ever computed once **every** device in `Visit.deviceIds` has a result; it
+never claims an aggregate from partial information (one `REPAIRED` out of three
+devices is `null`, not `FULLY_REPAIRED`), and a device outside the visit's own
+scope is never counted as "missing."
+
+### Reassignment and concurrency
+
+Identical guarantee to FS19: if `Visit.technicianId` changes from A to B, A's next
+request — start, complete, or any work-result write — gets `404` immediately, B's
+succeeds, and A's already-recorded results are untouched (`recordedById` keeps the
+original author; it is never used for authorization). Work-result writes touch the
+`Visit` document itself (a conditional `findOneAndUpdate` re-checking company,
+technician and `IN_PROGRESS` status, inside the same transaction as the write) as
+their serialization point — the same principle as FS18's lock-first pattern,
+without a separate lock collection, since the Visit document is already the
+natural point of contention between a reassignment, a lifecycle transition, and a
+work-result write.
+
+### Never returned to technicians (in addition to FS19's list)
+
+`recordedById`, `visitId`/`requestId`/`companyId` of anything other than the
+resource named in the URL, and any cost/price/billable field (none exists).
 
 ## Endpoints
 
