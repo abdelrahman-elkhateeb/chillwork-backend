@@ -503,7 +503,7 @@ bucket returns `429 RATE_LIMITED`.
 `REQUEST_NOT_SCHEDULABLE`, `DEVICE_ALREADY_SCHEDULED` (FS18),
 `VISIT_STATUS_CONFLICT`, `VERSION_CONFLICT`, `WORK_RESULTS_INCOMPLETE`
 (FS23), `BILLING_NOT_CONFIGURED`, `CURRENCY_LOCKED` (FS10),
-`INSUFFICIENT_STOCK` (FS11) — all follow the
+`INSUFFICIENT_STOCK` (FS11), `INVOICE_ALREADY_ISSUED` (FS25) — all follow the
 standard error envelope above.
 
 ### Assumptions (OPEN DECISIONs resolved with a default)
@@ -1278,6 +1278,76 @@ Response:
 `{ visitId, currency, devices: [<the object above>] }` — one entry per device in
 `Visit.deviceIds`, including devices with nothing picked (`items: []`, `version: 0`).
 Readable in any visit status.
+
+## Final invoice (FS25)
+
+Technician-only, same authorization chain as FS23 (a visit assigned to someone else is
+the uniform `404`). Requires billing settings (`409 BILLING_NOT_CONFIGURED`).
+
+> **Dependency note:** FS24 (service report) and FS22 (agreement workflow) do not
+> exist. The invoice is priced from what does exist: FS23 work results, the
+> technician's part selections (above), and the FS10 labor fee.
+
+### Pricing rule (no-fix-no-fee)
+
+- A `REPAIRED` device costs its picked parts (at their snapshotted prices) plus one
+  `laborFeeMinor`.
+- A `FAILED` device costs **zero** and lists no parts, even if parts were picked or
+  work was attempted; its `result`/`failureReason` stay on the invoice.
+- `subtotalMinor` = sum of parts on billable devices, `laborMinor` = fee × repaired
+  devices, `totalMinor` = both. Integer minor units only; nothing is rounded.
+
+### Invoice DTO
+
+```json
+{ "data": { "id": "...", "reference": "INV-7K9XQAB2", "visitId": "...",
+  "currency": "EGP", "laborFeeMinor": 15000,
+  "devices": [
+    { "clientDeviceId": "d1", "label": "Living room AC", "result": "REPAIRED", "failureReason": null,
+      "billable": true, "parts": [{ "partId": "...", "name": "Fan Motor", "unitPriceMinor": 45000,
+      "quantity": 1, "lineTotalMinor": 45000 }], "partsMinor": 45000, "laborMinor": 15000, "totalMinor": 60000 },
+    { "clientDeviceId": "d2", "label": "Bedroom AC", "result": "FAILED", "failureReason": "PART_UNAVAILABLE",
+      "billable": false, "parts": [], "partsMinor": 0, "laborMinor": 0, "totalMinor": 0 }],
+  "subtotalMinor": 45000, "laborMinor": 15000, "totalMinor": 60000,
+  "status": "ISSUED", "paymentState": "UNPAID", "issuedAt": "2026-09-27T12:00:00.000Z" } }
+```
+
+`status`/`paymentState` are `ISSUED`/`UNPAID`, or `CLOSED`/`NOT_REQUIRED` when the
+total is zero (every device failed) — a closed zero-charge record with no payment
+transaction of any kind. Recording payments is FS26.
+
+### `GET /api/v1/technician/visits/:id/invoice-preview`
+
+The same calculation from current data, without issuing anything or touching stock
+(no `id`/`reference`/`status`/`paymentState`/`issuedAt`). Allowed while the visit is
+`IN_PROGRESS` (to show the customer before finishing) or `COMPLETED`; otherwise
+`409 VISIT_STATUS_CONFLICT`. A device with no result yet has `result: null` and
+contributes zero.
+
+### `POST /api/v1/technician/visits/:id/invoice`
+
+Requires an `Idempotency-Key` header (same format as FS15) and a `COMPLETED` visit
+(`409 VISIT_STATUS_CONFLICT`). Behind the CSRF/origin guard. `201` with the invoice.
+
+One transaction does everything or nothing: re-check assignment + `COMPLETED` on the
+Visit document, price the invoice, take stock, write the invoice, the stock ledger
+(`INVOICE_ISSUED`) and an `INVOICE_ISSUED` VisitEvent.
+
+- **Stock:** for every part on a repaired device, one guarded decrement
+  (`stockQuantity >= quantity`). If any part is short (stock changed since it was
+  picked), `409 INSUFFICIENT_STOCK` with `fieldErrors["parts.<partId>"]` — no invoice,
+  no stock taken. Parts picked for failed devices are not taken.
+- **Exactly one invoice per visit** (unique index). A retry with the same
+  `Idempotency-Key` returns the existing invoice with `200`; any other key gets
+  `409 INVOICE_ALREADY_ISSUED`. Concurrent issuances serialize on the Visit document,
+  so only one ever commits.
+- **Immutable:** names, unit prices, the labor fee and all totals are copied into the
+  invoice, so later catalog or settings changes never alter it.
+
+### `GET /api/v1/technician/visits/:id/invoice`
+
+The issued invoice, or `404` if none has been issued yet. A customer-facing invoice
+view is FS27 and not implemented.
 
 ## Endpoints
 
