@@ -66,10 +66,13 @@ const serviceRequestSchema = new Schema(
   { timestamps: true }
 );
 
-// The only lookup pattern this feature needs: a customer's own requests
-// within their own company — the same server-derived scope every query
-// against this collection must use (see request.service.ts).
+// A customer's own requests within their own company — the same
+// server-derived scope every query against this collection must use (see
+// request.service.ts).
 serviceRequestSchema.index({ companyId: 1, customerId: 1, createdAt: -1 });
+// FS17 admin list: a company's requests, newest first (optionally by status).
+serviceRequestSchema.index({ companyId: 1, createdAt: -1 });
+serviceRequestSchema.index({ companyId: 1, status: 1, createdAt: -1 });
 
 export interface ServiceRequestDeviceDocument {
   clientDeviceId: string;
