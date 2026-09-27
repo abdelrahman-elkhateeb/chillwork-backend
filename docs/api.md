@@ -1227,6 +1227,58 @@ Every stock change (initial stock, admin adjustment, invoice issuance) writes a
 `PartStockMovement` (`delta`, `quantityAfter`, `reason`, actor, time, and the invoice
 for issuance) in the same transaction as the change.
 
+## Technician part selection
+
+The technician picks, per device, the catalog parts they are fitting — this is the
+price the customer sees and agrees to on site, and what FS25 bills for a repaired
+device. It is a deliberately small stand-in for FS22's agreement workflow (no
+preview/agreement revisions): the product owner chose "technician picks parts from
+the catalog, invoice = parts + labor fee".
+
+Same authorization chain as FS23 (`TECHNICIAN` role, current assignment via
+`findAssignedVisit`, device must be in `Visit.deviceIds` and on the request —
+otherwise the uniform `404`), and the same serialization point: every write
+re-checks company + technician + `IN_PROGRESS` on the Visit document inside its
+transaction. Requires billing settings (`409 BILLING_NOT_CONFIGURED`).
+
+### `PUT /api/v1/technician/visits/:visitId/devices/:deviceId/parts`
+
+```json
+{ "items": [{ "partId": "...", "quantity": 1 }, { "partId": "...", "quantity": 2 }], "version": 0 }
+```
+
+Replaces the device's whole list (`items: []` clears it; max 20 items, quantity
+1–100, each part once). Only ids and quantities are accepted — prices always come
+from the catalog; a client-supplied price/total is stripped.
+
+- A part **newly added** to the device must be active in the caller's company
+  (otherwise `400 VALIDATION_ERROR`, `fieldErrors["items.N.partId"]`) and is
+  snapshotted at the current catalog price. A part **already on** the device keeps
+  the name/price snapshotted when it was first added — the agreed price — even if
+  the catalog price changed or the part was deactivated since.
+- Every item needs `quantity <= stockQuantity` right now, otherwise
+  `409 INSUFFICIENT_STOCK` with `fieldErrors["items.N.quantity"]` and nothing is
+  saved. Stock is **not** reserved or decremented here; that happens atomically when
+  the invoice is issued.
+- `version` has the same compare-and-set semantics as work results (0 = nothing
+  selected yet; `409 VERSION_CONFLICT` on mismatch).
+- Only while the visit is `IN_PROGRESS` (`409 VISIT_STATUS_CONFLICT` otherwise).
+  Writes a `DEVICE_PARTS_UPDATED` VisitEvent.
+
+Response:
+
+```json
+{ "data": { "clientDeviceId": "d1", "partsMinor": 61000, "version": 1,
+  "items": [{ "partId": "...", "name": "Fan Motor", "unitPriceMinor": 45000, "quantity": 1, "lineTotalMinor": 45000 },
+            { "partId": "...", "name": "Capacitor", "unitPriceMinor": 8000, "quantity": 2, "lineTotalMinor": 16000 }] } }
+```
+
+### `GET /api/v1/technician/visits/:visitId/parts`
+
+`{ visitId, currency, devices: [<the object above>] }` — one entry per device in
+`Visit.deviceIds`, including devices with nothing picked (`items: []`, `version: 0`).
+Readable in any visit status.
+
 ## Endpoints
 
 ### `GET /api/v1/health`
