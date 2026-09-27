@@ -10,8 +10,6 @@ import {
   MAX_DEVICE_BRAND_LENGTH,
   MAX_DEVICE_LABEL_LENGTH,
   MAX_DEVICE_MODEL_LENGTH,
-  MAX_PHOTO_IDS_PER_DEVICE,
-  MAX_PHOTO_ID_LENGTH,
 } from "./request.constants.js";
 
 /**
@@ -32,7 +30,8 @@ export const deviceInputSchema = z.object({
     .string()
     .max(MAX_ORIGINAL_DESCRIPTION_LENGTH, "originalDescription is too long")
     .refine((value) => value.trim().length > 0, "originalDescription is required"),
-  photoIds: z.array(z.string().min(1).max(MAX_PHOTO_ID_LENGTH)).max(MAX_PHOTO_IDS_PER_DEVICE).default([]),
+  // No photoIds: photo attachments (FS12/FS13) were cancelled for the MVP.
+  // A client that still sends one has it stripped like any unknown key.
 });
 
 export type DeviceInput = z.infer<typeof deviceInputSchema>;

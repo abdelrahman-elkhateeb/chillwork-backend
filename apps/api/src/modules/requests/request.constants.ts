@@ -32,8 +32,6 @@ export const CONTACT_PHONE_REGEX = /^\+?[1-9]\d{6,14}$/;
 export const MAX_DEVICE_LABEL_LENGTH = 100;
 export const MAX_DEVICE_BRAND_LENGTH = 100;
 export const MAX_DEVICE_MODEL_LENGTH = 100;
-export const MAX_PHOTO_IDS_PER_DEVICE = 10;
-export const MAX_PHOTO_ID_LENGTH = 200;
 
 // Reference generation --------------------------------------------------------
 // Excludes 0/O/1/I to avoid human transcription ambiguity.

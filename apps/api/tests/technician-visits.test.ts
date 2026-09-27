@@ -364,8 +364,5 @@ describe("DTO safety and AI analysis", () => {
   });
 });
 
-// Photo/evidence access is intentionally NOT covered here: FS13 (photo
-// storage/ownership) does not exist in this repository, so there is no real
-// model to authorize against. Assignment-scoped photo authorization and its
-// tests (Visit B / Request B / unrelated-company photos denied) are deferred
-// until FS13 provides one.
+// Photo/evidence access is not covered: photo attachments (FS12/FS13) were
+// cancelled for the MVP, so no photo model or endpoint exists.

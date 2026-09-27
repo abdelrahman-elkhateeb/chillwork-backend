@@ -168,8 +168,6 @@ describe("POST /api/v1/requests — validation", () => {
       requestBody({ devices: [device({ clientDeviceId: "dup" }), device({ clientDeviceId: "dup" })] }),
     ],
     ["oversized description", requestBody({ devices: [device({ originalDescription: "x".repeat(4001) })] })],
-    ["excessive photo IDs", requestBody({ devices: [device({ photoIds: Array.from({ length: 11 }, () => "p") })] })],
-    ["malformed photo IDs (non-string)", requestBody({ devices: [device({ photoIds: [123] })] })],
   ])("rejects %s with VALIDATION_ERROR and creates no request", async (_label, body) => {
     const { cookies } = await setupCustomer(app);
     const res = await postRequests(app, cookies).send(body);
@@ -207,18 +205,19 @@ describe("POST /api/v1/requests — Idempotency-Key header", () => {
   });
 });
 
-describe("POST /api/v1/requests — photo attachments (FS13 not implemented)", () => {
+describe("POST /api/v1/requests — photo attachments (cancelled for the MVP)", () => {
   const app = createApp();
 
-  it("rejects a request with any photoIds and creates nothing", async () => {
+  it("strips a legacy photoIds field instead of rejecting the request", async () => {
     const { cookies } = await setupCustomer(app);
     const body = requestBody({ devices: [device({ photoIds: ["photo-1"] })] });
+    mockGeminiSuccess(body.devices as Array<{ clientDeviceId: string }>);
 
     const res = await postRequests(app, cookies).send(body);
 
-    expect(res.status).toBe(503);
-    expect(res.body.error.code).toBe("PHOTO_NOT_AVAILABLE");
-    expect(await ServiceRequest.countDocuments({})).toBe(0);
+    expect(res.status).toBe(201);
+    const stored = await ServiceRequest.findOne({}).lean();
+    expect(stored?.devices[0]).not.toHaveProperty("photoIds");
   });
 });
 

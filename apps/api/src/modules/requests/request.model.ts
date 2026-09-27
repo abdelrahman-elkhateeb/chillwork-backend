@@ -24,10 +24,6 @@ const serviceRequestDeviceSchema = new Schema(
     // Exactly what the customer submitted — never trimmed/rewritten here
     // or anywhere upstream (see request.schemas.ts).
     originalDescription: { type: String, required: true },
-    // Always empty until FS13 (photo/upload) exists — see docs/api.md
-    // "Photo attachments" for why this is a documented blocker rather
-    // than an invented ownership model.
-    photoIds: { type: [String], default: [] },
     analysis: {
       type: new Schema(
         {
@@ -81,7 +77,6 @@ export interface ServiceRequestDeviceDocument {
   brand: string | null;
   model: string | null;
   originalDescription: string;
-  photoIds: string[];
   analysis: DeviceAnalysis | null;
   analysisMetadata: {
     status: AnalysisStatus;

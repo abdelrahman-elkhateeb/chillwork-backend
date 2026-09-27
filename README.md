@@ -138,16 +138,13 @@ Run from `apps/api/`:
 - `POST /api/v1/requests` (FS15) — customer-only, idempotent, multi-device
   service request creation, calling FS14 before persisting — see
   [docs/api.md](docs/api.md) "Service requests (FS15)". Photo attachments
-  (`photoIds`) are rejected with `503 PHOTO_NOT_AVAILABLE`: FS13
-  (photo/upload) doesn't exist anywhere in this repository yet, and
-  accepting an unverified photo reference would be an ownership hole, not
-  a feature.
+  (FS12/FS13) were cancelled for the MVP; there is no `photoIds` field.
 - Admin visit scheduling (FS18) - see [docs/api.md](docs/api.md) "Visit
   scheduling (FS18)". FS09/FS17 do not exist in this repo, so it adds only
   what it needs (`Company.timezone`, visit models) and documents its assumptions.
 - Technician visit read access (FS19, `GET /technician/visits[/:id]`) - see
-  [docs/api.md](docs/api.md). Only the read half exists: photos/evidence wait on FS13,
-  which does not exist in this repo.
+  [docs/api.md](docs/api.md). Photos/evidence are out of scope (FS13 was cancelled
+  for the MVP).
 - Technician work execution (FS23, `POST /technician/visits/:id/start`,
   `POST /technician/visits/:id/complete`,
   `PUT /technician/visits/:visitId/work-results/:deviceId`,

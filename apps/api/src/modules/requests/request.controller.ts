@@ -10,8 +10,7 @@ import type { ServiceRequestDocument } from "./request.model.js";
  * Never the raw Mongoose document. Deliberately excludes `analysis`/
  * `analysisMetadata` — AI output is a staff-facing concern (see
  * docs/api.md "Customer-safe response"), not something this customer
- * creation endpoint returns. `photoIds` is omitted too since it's always
- * empty right now (see the FS13 blocker note in request.service.ts).
+ * creation endpoint returns.
  */
 function toSafeServiceRequest(doc: ServiceRequestDocument) {
   return {

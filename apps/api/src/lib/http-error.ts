@@ -90,10 +90,6 @@ export class HttpError extends Error {
     return new HttpError(409, "IDEMPOTENCY_CONFLICT", message);
   }
 
-  static photoNotAvailable(message = "Photo attachments are not available yet"): HttpError {
-    return new HttpError(503, "PHOTO_NOT_AVAILABLE", message);
-  }
-
   static requestCreationFailed(message = "Unable to create the request, please try again"): HttpError {
     return new HttpError(500, "REQUEST_CREATION_FAILED", message);
   }

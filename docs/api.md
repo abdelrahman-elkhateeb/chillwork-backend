@@ -498,7 +498,7 @@ bucket returns `429 RATE_LIMITED`.
 `INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_REUSED`, `RATE_LIMITED`,
 `CSRF_ORIGIN_REJECTED` (FS02), `CONFLICT`, `DEMO_COMPANY_UNAVAILABLE`
 (FS04), `MISSING_IDEMPOTENCY_KEY`, `INVALID_IDEMPOTENCY_KEY`,
-`IDEMPOTENCY_IN_PROGRESS`, `IDEMPOTENCY_CONFLICT`, `PHOTO_NOT_AVAILABLE`,
+`IDEMPOTENCY_IN_PROGRESS`, `IDEMPOTENCY_CONFLICT`,
 `REQUEST_CREATION_FAILED` (FS15), `SCHEDULE_CONFLICT`,
 `REQUEST_NOT_SCHEDULABLE`, `DEVICE_ALREADY_SCHEDULED` (FS18),
 `VISIT_STATUS_CONFLICT`, `VERSION_CONFLICT`, `WORK_RESULTS_INCOMPLETE`
@@ -687,8 +687,7 @@ Content-Type: application/json
       "label": "Refrigerator",
       "brand": "Acme",
       "model": "X100",
-      "originalDescription": "Not cooling properly and making a buzzing noise.",
-      "photoIds": []
+      "originalDescription": "Not cooling properly and making a buzzing noise."
     }
   ]
 }
@@ -736,32 +735,23 @@ supplied, never a sequential/predictable counter).
 Errors: `VALIDATION_ERROR` (400), `MISSING_IDEMPOTENCY_KEY` /
 `INVALID_IDEMPOTENCY_KEY` (400 — header absent or outside
 `[A-Za-z0-9_-]{1,200}`), `FORBIDDEN` (403 — authenticated but not a
-`CUSTOMER`), `PHOTO_NOT_AVAILABLE` (503 — see "Photo attachments"
-below), `IDEMPOTENCY_IN_PROGRESS` / `IDEMPOTENCY_CONFLICT` (409 — see
+`CUSTOMER`), `IDEMPOTENCY_IN_PROGRESS` / `IDEMPOTENCY_CONFLICT` (409 — see
 "Idempotency"), `RATE_LIMITED` (429), `CSRF_ORIGIN_REJECTED` (403),
 `REQUEST_CREATION_FAILED` (500 — persistence failed after a successful
 Gemini call; safe to retry with the same Idempotency-Key).
 
-### Photo attachments — blocked pending FS13
+### Photo attachments — cancelled for the MVP
 
-FS13 (photo/upload) **does not exist anywhere in this repository** —
-no model, no ownership contract, nothing to verify a `photoId` against.
-Accepting one anyway would mean trusting a client-supplied identifier
-with no way to confirm it belongs to this customer/company — exactly
-the "attach another customer's photo by guessing an ID" hole this
-endpoint is required to prevent. So rather than invent a photo/ownership
-architecture or silently accept unverified IDs, **any device with a
-non-empty `photoIds` array is rejected with `503
-PHOTO_NOT_AVAILABLE`, and nothing is created.** `photoIds: []` (or
-omitted) works today. When FS13 ships, this becomes a real ownership
-check (`photo.companyId`/`photo.customerId` cross-checked against
-`req.auth`, the same pattern used everywhere else in this codebase) —
-not a redesign.
+Photo upload/storage (FS12/FS13) was cancelled for the MVP on 2026-09-27.
+There is no `photoIds` field: a client that still sends one has it stripped
+like any other unknown key, and nothing photo-related is stored. (Before the
+cancellation, a non-empty `photoIds` was rejected with `503
+PHOTO_NOT_AVAILABLE`; that error code no longer exists.)
 
 ### Gemini integration (FS14)
 
 `analyzeDevices()` is called exactly once per new submission (never on
-an idempotent replay — see below), after the photo check and the
+an idempotent replay — see below), after the
 idempotency reservation, before the database transaction. The mapping
 is `clientDeviceId`/`originalDescription` straight through, with
 `label`/`brand`/`model` combined into FS14's `equipment` input. A
@@ -785,7 +775,7 @@ a duplicate.
 - **Same key, same payload** → `200` with the original request, no
   second Gemini call, no second document created. "Same payload" is
   checked via a SHA-256 fingerprint of a canonicalized request shape
-  (devices sorted by `clientDeviceId`, each device's `photoIds` sorted)
+  (devices sorted by `clientDeviceId`)
   — the fingerprint is stored, the raw request content never is.
 - **Same key, different payload** → `409 IDEMPOTENCY_CONFLICT`. Nothing
   is created.
