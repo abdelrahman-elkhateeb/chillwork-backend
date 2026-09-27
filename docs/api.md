@@ -909,7 +909,7 @@ The visit and its two events (`VISIT_SCHEDULED`, `TECHNICIAN_ASSIGNED`, recorded
   needs to set the status (the conflict check is status-based).
 - No business-hours, past-date, or lookahead rules were specified, so none are enforced.
 
-## Technician visit access (FS19 - read half)
+## Technician visit access (FS19)
 
 Technician-only (`TECHNICIAN` role; `CUSTOMER`/`ADMIN` get `403 FORBIDDEN`). Both
 endpoints are read-only `GET`s. The technician is always `req.auth.userId` within
@@ -917,11 +917,10 @@ endpoints are read-only `GET`s. The technician is always `req.auth.userId` withi
 `companyId` query parameter is rejected with `VALIDATION_ERROR` (unrecognized
 filters are never silently ignored - see Pagination).
 
-> **Scope note:** this is only the read half of FS19. Photo/evidence access, technician
-> actions (edit/upload/collect/complete) and reassignment are not implemented.
-> FS13 (photo storage and ownership) does not exist in this repository, so no photo
-> endpoint, field or authorization exists; assignment-scoped photo access is deferred
-> until FS13 provides a real model.
+> **Scope note:** photo/evidence access is out of scope — photos (FS13) were cancelled
+> for the MVP. Technician actions live in FS23, part selection and FS25; the visit
+> list/detail advertise them through `allowedActions` (below). Admin reassignment is
+> FS20 and not implemented.
 
 ### `GET /api/v1/technician/visits`
 
@@ -942,7 +941,7 @@ ordered by `startAt` then id, so paging is deterministic.
     "customer": { "name": "Jane Customer", "phone": "+15550001111" },
     "address": "123 Main St",
     "devices": [{ "clientDeviceId": "d1", "label": "Refrigerator", "brand": "Acme", "model": "X1" }],
-    "allowedActions": []
+    "allowedActions": ["START_VISIT"]
   }],
   "meta": { "page": 1, "pageSize": 20, "total": 1 }
 }
@@ -964,6 +963,21 @@ on the request):
 `analysisStatus` is only `SUCCESS`, `FAILED` or `UNAVAILABLE`. The analysis is AI-generated
 assistance derived from customer text - treat it as advisory, not a diagnosis.
 `customer.phone` is the contact number the customer gave for this request.
+
+### `allowedActions`
+
+Derived only from the visit's status and whether its invoice exists:
+
+| Visit status | `allowedActions` |
+| ------------ | ---------------- |
+| `SCHEDULED` | `START_VISIT` |
+| `IN_PROGRESS` | `SELECT_PARTS`, `RECORD_WORK_RESULT`, `COMPLETE_VISIT` |
+| `COMPLETED` | `ISSUE_INVOICE` until the invoice exists, then none |
+| `CANCELLED` | none |
+
+It is a UI hint, not an authorization decision: every action endpoint still re-checks
+assignment and status itself (e.g. `COMPLETE_VISIT` can still answer
+`409 WORK_RESULTS_INCOMPLETE`).
 
 ### Authorization
 
@@ -990,7 +1004,8 @@ document (or take a `visit:<id>` `ScheduleLock`) first, like FS18's lock-first p
 Customer email, `customerId`, `companyId`, `technicianId`, `scheduledById`, the request's
 internal id, other technicians' assignments, other requests or devices, AI provider
 metadata (model, prompt version, timestamps, error codes), lock or idempotency data, and
-any financial data (none exists yet).
+any financial data (prices and totals are only returned by the part-selection and
+invoice endpoints).
 
 ### Index
 
@@ -1011,9 +1026,9 @@ cached/earlier fetch). All mutating routes below are also behind the
 > therefore does not — and cannot — validate "approved work" or compute anything
 > billable. It records what a technician actually did, per device, using
 > `Visit.deviceIds` (the set an admin already assigned to the visit) as the closest
-> existing stand-in for "the work this visit covers." A later billing feature
-> reads this data; nothing here calculates money, and no photo/evidence handling
-> is included (FS13 still doesn't exist).
+> existing stand-in for "the work this visit covers." FS25 invoicing reads this
+> data; nothing here calculates money, and no photo/evidence handling is included
+> (FS13 was cancelled for the MVP).
 
 ### Visit lifecycle transitions
 
@@ -1118,7 +1133,8 @@ work-result write.
 ### Never returned to technicians (in addition to FS19's list)
 
 `recordedById`, `visitId`/`requestId`/`companyId` of anything other than the
-resource named in the URL, and any cost/price/billable field (none exists).
+resource named in the URL, and any cost/price/billable field (work results carry none;
+prices live in part selections and invoices).
 
 ## Company settings and labor fee (FS10)
 
