@@ -818,6 +818,84 @@ stops a single customer from being the one who exhausts it. Checked
 before the idempotency reservation, so a throttled call never reserves
 a key or reaches Gemini.
 
+## Customer requests, detail and timeline (FS16)
+
+Customer-only (`ADMIN`/`TECHNICIAN` get `403`) and read-only. Every lookup is scoped to
+`companyId` **and** `customerId = req.auth.userId`; another customer's request, a
+missing id and a malformed id are all the same `404` ("Request not found").
+
+**Never returned to customers:** AI analysis, the technician's free-text
+`failureNote`, staff/actor ids, part-selection edits, and any price before an invoice
+exists.
+
+### Progress
+
+Each device gets a `progress` from its latest visit that is not `CANCELLED`:
+
+| `progress` | Meaning |
+| ---------- | ------- |
+| `AWAITING_SCHEDULE` | no visit covers the device (or its only visit was cancelled) |
+| `SCHEDULED` / `IN_PROGRESS` | the covering visit's status |
+| `REPAIRED` / `NOT_REPAIRED` | the covering visit is `COMPLETED`; `NOT_REPAIRED` carries the structured `failureReason` |
+
+A result only shows once its visit is `COMPLETED`; while the technician is working,
+the device is `IN_PROGRESS` even if a result was already recorded.
+
+The request's `progress` is `COMPLETED` only when **every** device is `REPAIRED` or
+`NOT_REPAIRED`, and only then is `outcome` set: `FULLY_REPAIRED` requires every device
+repaired, so a request with one failed device is `PARTIALLY_REPAIRED` (or
+`NO_REPAIR`), never "all resolved". Otherwise `progress` is `IN_PROGRESS` (any device
+in progress), `SCHEDULED` (any device scheduled or done) or `SUBMITTED`, with
+`outcome: null`.
+
+### `GET /api/v1/requests?status=&page=&pageSize=`
+
+The caller's requests, newest first (stable paging; default 20, max 100; unknown
+filters such as `customerId` are `400`).
+
+```json
+{ "data": [{ "requestId": "...", "reference": "SR-7K9XQAB2", "status": "SUBMITTED",
+  "progress": "SCHEDULED", "outcome": null, "createdAt": "...", "address": "...", "deviceCount": 2,
+  "devices": [{ "clientDeviceId": "a", "label": "Living room AC", "progress": "SCHEDULED" },
+              { "clientDeviceId": "b", "label": "Bedroom AC", "progress": "AWAITING_SCHEDULE" }] }],
+  "meta": { "page": 1, "pageSize": 20, "total": 1 } }
+```
+
+### `GET /api/v1/requests/:id`
+
+```json
+{ "data": { "requestId": "...", "reference": "SR-7K9XQAB2", "status": "SUBMITTED",
+  "progress": "COMPLETED", "outcome": "PARTIALLY_REPAIRED", "createdAt": "...",
+  "address": "...", "contactPhone": "+201000000004",
+  "devices": [{ "clientDeviceId": "a", "label": "Living room AC", "brand": null, "model": null,
+    "originalDescription": "...", "progress": "NOT_REPAIRED", "failureReason": "PART_UNAVAILABLE", "visitId": "..." }],
+  "visits": [{ "visitId": "...", "startAt": "...", "endAt": "...", "timezone": "Africa/Cairo",
+    "status": "COMPLETED", "technicianName": "Omar Technician", "deviceIds": ["a"],
+    "invoice": { "id": "...", "reference": "INV-...", "currency": "EGP", "totalMinor": 68000,
+      "status": "ISSUED", "paymentState": "UNPAID", "issuedAt": "..." } }] } }
+```
+
+Cancelled visits are left out. Times are UTC ISO strings with the visit's IANA
+`timezone` for display. `invoice` is a summary/link; the itemized customer invoice
+view is FS27. There is no service report yet (FS24).
+
+### `GET /api/v1/requests/:id/timeline`
+
+Customer-visible history, oldest first, built from the audited `VisitEvent` log plus
+the request's own creation:
+
+```json
+{ "data": [
+  { "type": "REQUEST_SUBMITTED", "occurredAt": "...", "visitId": null },
+  { "type": "VISIT_SCHEDULED", "occurredAt": "...", "visitId": "..." },
+  { "type": "VISIT_STARTED", "occurredAt": "...", "visitId": "..." },
+  { "type": "VISIT_COMPLETED", "occurredAt": "...", "visitId": "..." },
+  { "type": "INVOICE_ISSUED", "occurredAt": "...", "visitId": "..." } ] }
+```
+
+Only those five types appear. Assignment, work-result and part-selection events are
+internal, and no event carries an actor, a note or a result.
+
 ## Admin request triage (FS17)
 
 Admin-only and read-only (`CUSTOMER`/`TECHNICIAN` get `403`). Everything is scoped to
