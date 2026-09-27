@@ -361,7 +361,7 @@ describe("DTO safety and AI analysis", () => {
   it.each([
     ["SCHEDULED", ["START_VISIT"]],
     ["IN_PROGRESS", ["SELECT_PARTS", "RECORD_WORK_RESULT", "COMPLETE_VISIT"]],
-    ["COMPLETED", ["ISSUE_INVOICE"]],
+    ["COMPLETED", ["SELECT_PARTS", "ISSUE_INVOICE"]],
     ["CANCELLED", []],
   ] as const)("derives allowedActions for a %s visit", async (status, expected) => {
     const w = await world();

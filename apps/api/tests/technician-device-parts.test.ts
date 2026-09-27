@@ -2,8 +2,10 @@ import { randomUUID } from "node:crypto";
 import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
+import { Invoice } from "../src/modules/billing/invoice.model.js";
 import { Part } from "../src/modules/catalog/part.model.js";
 import { DeviceParts } from "../src/modules/technician/device-parts.model.js";
+import { WorkResult } from "../src/modules/technician/work-result.model.js";
 import { VisitEvent } from "../src/modules/visits/visit-event.model.js";
 import { Visit } from "../src/modules/visits/visit.model.js";
 import {
@@ -126,8 +128,105 @@ describe("PUT /technician/visits/:visitId/devices/:deviceId/parts", () => {
     const res = await put(w.tech.cookies, w.visit._id, "d1", { items: [{ partId: String(w.cap._id), quantity: 3 }], version: 0 });
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe("INSUFFICIENT_STOCK");
-    expect(res.body.error.fieldErrors).toEqual({ "items.0.quantity": ["Only 2 in stock"] });
+    expect(res.body.error.fieldErrors).toEqual({ "items.0.quantity": ["Only 2 available"] });
     expect(await DeviceParts.countDocuments({})).toBe(0);
+  });
+
+  it("counts units already picked for another device on the same visit", async () => {
+    const w = await world();
+    await put(w.tech.cookies, w.visit._id, "d1", { items: [{ partId: String(w.cap._id), quantity: 2 }], version: 0 });
+    const res = await put(w.tech.cookies, w.visit._id, "d2", { items: [{ partId: String(w.cap._id), quantity: 1 }], version: 0 });
+    expect(res.status).toBe(409);
+    expect(res.body.error.fieldErrors).toEqual({ "items.0.quantity": ["Only 0 available"] });
+  });
+
+  it("does not count the device's own previous pick against it", async () => {
+    const w = await world();
+    await put(w.tech.cookies, w.visit._id, "d1", { items: [{ partId: String(w.cap._id), quantity: 2 }], version: 0 });
+    const res = await put(w.tech.cookies, w.visit._id, "d1", { items: [{ partId: String(w.cap._id), quantity: 2 }], version: 1 });
+    expect(res.status).toBe(200);
+  });
+
+  it("counts units picked on another technician's visit, but not once that pick is released", async () => {
+    const w = await world();
+    const other = await member(w.company._id, "TECHNICIAN");
+    const req2 = await createServiceRequest(w.company._id, w.customer.user._id, [{ clientDeviceId: "x" }]);
+    const visit2 = await createVisitDoc({
+      companyId: w.company._id,
+      requestId: req2._id,
+      technicianId: other.user._id,
+      scheduledById: w.admin.user._id,
+      deviceIds: ["x"],
+      status: "IN_PROGRESS",
+    });
+    await put(other.cookies, visit2._id, "x", { items: [{ partId: String(w.cap._id), quantity: 2 }], version: 0 });
+    const pickOne = (version: number) =>
+      put(w.tech.cookies, w.visit._id, "d1", { items: [{ partId: String(w.cap._id), quantity: 1 }], version });
+
+    expect((await pickOne(0)).status).toBe(409);
+
+    // The other device failed: its parts are never fitted, so they are released.
+    await WorkResult.create({
+      companyId: w.company._id,
+      visitId: visit2._id,
+      requestId: req2._id,
+      clientDeviceId: "x",
+      result: "FAILED",
+      failureReason: "OTHER",
+      version: 1,
+      recordedById: other.user._id,
+    });
+    expect((await pickOne(0)).status).toBe(200);
+  });
+
+  it.each([
+    ["the other visit was cancelled", { status: "CANCELLED" }],
+    ["the other visit's invoice was issued (stock already taken)", { invoiced: true }],
+  ])("releases a pick when %s", async (_label, change) => {
+    const w = await world();
+    const other = await member(w.company._id, "TECHNICIAN");
+    const req2 = await createServiceRequest(w.company._id, w.customer.user._id, [{ clientDeviceId: "x" }]);
+    const visit2 = await createVisitDoc({
+      companyId: w.company._id,
+      requestId: req2._id,
+      technicianId: other.user._id,
+      scheduledById: w.admin.user._id,
+      deviceIds: ["x"],
+      status: "IN_PROGRESS",
+    });
+    await put(other.cookies, visit2._id, "x", { items: [{ partId: String(w.cap._id), quantity: 2 }], version: 0 });
+    if ("status" in change) await Visit.updateOne({ _id: visit2._id }, { $set: { status: change.status } });
+    if ("invoiced" in change) {
+      await Invoice.create({
+        companyId: w.company._id,
+        visitId: visit2._id,
+        requestId: req2._id,
+        customerId: w.customer.user._id,
+        issuedById: other.user._id,
+        reference: `INV-${randomUUID().slice(0, 8)}`,
+        idempotencyKey: "k",
+        currency: "EGP",
+        laborFeeMinor: 0,
+        devices: [],
+        subtotalMinor: 0,
+        laborMinor: 0,
+        totalMinor: 0,
+        status: "CLOSED",
+        paymentState: "NOT_REQUIRED",
+        issuedAt: new Date(),
+      });
+    }
+    const res = await put(w.tech.cookies, w.visit._id, "d1", { items: [{ partId: String(w.cap._id), quantity: 2 }], version: 0 });
+    expect(res.status).toBe(200);
+  });
+
+  it("lets only one of two concurrent picks take the last units", async () => {
+    const w = await world();
+    const results = await Promise.all([
+      put(w.tech.cookies, w.visit._id, "d1", { items: [{ partId: String(w.cap._id), quantity: 2 }], version: 0 }),
+      put(w.tech.cookies, w.visit._id, "d2", { items: [{ partId: String(w.cap._id), quantity: 2 }], version: 0 }),
+    ]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
   });
 
   it("does not decrement stock (that happens at invoice issuance)", async () => {
@@ -189,12 +288,40 @@ describe("PUT /technician/visits/:visitId/devices/:deviceId/parts", () => {
     expect((await DeviceParts.findOne({ clientDeviceId: "d1" }))?.version).toBe(1);
   });
 
-  it.each(["SCHEDULED", "COMPLETED", "CANCELLED"] as const)("rejects changes while the visit is %s", async (status) => {
+  it.each(["SCHEDULED", "CANCELLED"] as const)("rejects changes while the visit is %s", async (status) => {
     const w = await world();
     await Visit.updateOne({ _id: w.visit._id }, { $set: { status } });
     const res = await put(w.tech.cookies, w.visit._id, "d1", { items: [], version: 0 });
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe("VISIT_STATUS_CONFLICT");
+  });
+
+  it("stays editable after COMPLETED until the invoice is issued", async () => {
+    const w = await world();
+    await Visit.updateOne({ _id: w.visit._id }, { $set: { status: "COMPLETED" } });
+    expect((await put(w.tech.cookies, w.visit._id, "d1", { items: [], version: 0 })).status).toBe(200);
+
+    await Invoice.create({
+      companyId: w.company._id,
+      visitId: w.visit._id,
+      requestId: w.req._id,
+      customerId: w.customer.user._id,
+      issuedById: w.tech.user._id,
+      reference: `INV-${randomUUID().slice(0, 8)}`,
+      idempotencyKey: "k",
+      currency: "EGP",
+      laborFeeMinor: 0,
+      devices: [],
+      subtotalMinor: 0,
+      laborMinor: 0,
+      totalMinor: 0,
+      status: "CLOSED",
+      paymentState: "NOT_REQUIRED",
+      issuedAt: new Date(),
+    });
+    const res = await put(w.tech.cookies, w.visit._id, "d1", { items: [], version: 1 });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("INVOICE_ALREADY_ISSUED");
   });
 
   it("rejects a request device that is not part of this visit", async () => {

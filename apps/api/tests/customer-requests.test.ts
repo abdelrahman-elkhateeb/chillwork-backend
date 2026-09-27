@@ -262,4 +262,25 @@ describe("GET /requests/:id/timeline", () => {
     expect(res.body.data[1]).toEqual({ type: "VISIT_SCHEDULED", occurredAt: at(0).toISOString(), visitId: String(v._id) });
     expect(JSON.stringify(res.body.data)).not.toMatch(/actorId|technicianId|FAILED/);
   });
+
+  it("leaves out events of cancelled visits, like the detail endpoint", async () => {
+    const w = await world();
+    const req = await createServiceRequest(w.company._id, w.customer.user._id, [{ clientDeviceId: "a" }]);
+    const cancelled = await visit(w, req._id, ["a"], "CANCELLED");
+    const live = await visit(w, req._id, ["a"], "SCHEDULED");
+    for (const v of [cancelled, live]) {
+      await VisitEvent.create({
+        companyId: w.company._id,
+        visitId: v._id,
+        requestId: req._id,
+        actorId: w.admin.user._id,
+        technicianId: w.tech.user._id,
+        type: "VISIT_SCHEDULED",
+        occurredAt: new Date(),
+      });
+    }
+
+    const res = await get(w.customer.cookies, `/api/v1/requests/${String(req._id)}/timeline`);
+    expect(res.body.data.map((e: { visitId: string | null }) => e.visitId)).toEqual([null, String(live._id)]);
+  });
 });
