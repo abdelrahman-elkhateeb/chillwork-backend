@@ -129,4 +129,8 @@ export class HttpError extends Error {
   static currencyLocked(message = "The company currency cannot be changed once it is set"): HttpError {
     return new HttpError(409, "CURRENCY_LOCKED", message);
   }
+
+  static insufficientStock(message = "Not enough stock for one or more parts"): HttpError {
+    return new HttpError(409, "INSUFFICIENT_STOCK", message);
+  }
 }
