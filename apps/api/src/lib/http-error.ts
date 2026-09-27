@@ -125,4 +125,8 @@ export class HttpError extends Error {
   static workResultsIncomplete(message = "Every device on this visit needs a recorded result before it can be completed"): HttpError {
     return new HttpError(409, "WORK_RESULTS_INCOMPLETE", message);
   }
+
+  static workNotApproved(message = "This device has no approved work yet"): HttpError {
+    return new HttpError(409, "WORK_NOT_APPROVED", message);
+  }
 }

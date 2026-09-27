@@ -8,6 +8,9 @@ import { findAssignedVisit, type TechnicianAuthContext } from "./technician-visi
 import type { RecordWorkResultInput } from "./work-result.schemas.js";
 import { WorkResult, type WorkResultDocument } from "./work-result.model.js";
 import type { VisitOutcome } from "./work-result.constants.js";
+// FS22 -> FS23 boundary. work-agreement.service.ts does not import
+// anything from this file, so this stays a one-way dependency (no cycle).
+import { assertDeviceWithinApprovedScope } from "./work-agreement.service.js";
 
 /**
  * The device must be part of *this* visit's assigned scope, and it must
@@ -85,6 +88,11 @@ export async function recordWorkResult(
 ): Promise<WorkResultDocument> {
   const visit = await findAssignedVisit(auth, visitId);
   await assertDeviceInVisitScope(auth, visit, deviceId);
+  // FS22 boundary: gated only once a work agreement actually exists for
+  // this device — see assertDeviceWithinApprovedScope's own comment in
+  // work-agreement.service.ts for the documented fallback when it does
+  // not (visits/devices that predate FS22 adoption).
+  await assertDeviceWithinApprovedScope(auth, visit._id, deviceId, input.result);
 
   const session = await mongoose.startSession();
   try {
