@@ -29,7 +29,8 @@ export function allowedActionsFor(status: VisitDocument["status"], invoiceIssued
     case "IN_PROGRESS":
       return ["SELECT_PARTS", "RECORD_WORK_RESULT", "COMPLETE_VISIT"];
     case "COMPLETED":
-      return invoiceIssued ? [] : ["ISSUE_INVOICE"];
+      // Parts stay editable until the invoice exists (device-parts.service.ts).
+      return invoiceIssued ? [] : ["SELECT_PARTS", "ISSUE_INVOICE"];
     default:
       return [];
   }

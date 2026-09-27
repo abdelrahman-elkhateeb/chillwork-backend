@@ -36,14 +36,12 @@ export async function assertDeviceInVisitScope(auth: TechnicianAuthContext, visi
  * here collides with a concurrent status change the same way FS18's
  * lock-first pattern collides two bookings — no separate lock collection
  * needed. Also re-verifies assignment/status atomically inside the
- * transaction (not just at the top of the request). Part selection
- * (device-parts.service.ts) uses the same serialization point.
+ * transaction (not just at the top of the request).
  */
-export async function touchAssignedInProgressVisit(
+async function touchAssignedInProgressVisit(
   auth: TechnicianAuthContext,
   visitId: Types.ObjectId,
-  session: mongoose.ClientSession,
-  statusConflictMessage = "Work results can only be recorded while the visit is IN_PROGRESS"
+  session: mongoose.ClientSession
 ): Promise<void> {
   const touched = await Visit.findOneAndUpdate(
     { _id: visitId, companyId: auth.companyId, technicianId: auth.userId, status: "IN_PROGRESS" },
@@ -62,7 +60,7 @@ export async function touchAssignedInProgressVisit(
   if (!stillAssigned) {
     throw HttpError.notFound("Visit not found");
   }
-  throw HttpError.visitStatusConflict(statusConflictMessage);
+  throw HttpError.visitStatusConflict("Work results can only be recorded while the visit is IN_PROGRESS");
 }
 
 /**

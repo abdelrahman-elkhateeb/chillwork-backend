@@ -252,14 +252,20 @@ const MAX_TIMELINE_EVENTS = 500;
 /**
  * Built from the audited VisitEvent log plus the request's own creation.
  * Assignment details, work-result edits and part-selection edits are
- * internal and left out; events carry no actor ids or notes.
+ * internal and left out; events carry no actor ids or notes. Events of
+ * CANCELLED visits are left out too, matching the detail endpoint (which
+ * hides those visits) — there is no cancellation event to show until FS20.
  */
 export async function getCustomerRequestTimeline(auth: CustomerAuthContext, requestId: string) {
   const request = await findOwnRequest(auth, requestId);
+  const cancelled = await Visit.find({ companyId: auth.companyId, requestId: request._id, status: "CANCELLED" }).select(
+    "_id"
+  );
   const events = await VisitEvent.find({
     companyId: auth.companyId,
     requestId: request._id,
     type: { $in: Object.keys(VISIBLE_VISIT_EVENTS) },
+    visitId: { $nin: cancelled.map((visit) => visit._id) },
   })
     .sort({ occurredAt: 1, _id: 1 })
     .limit(MAX_TIMELINE_EVENTS);
