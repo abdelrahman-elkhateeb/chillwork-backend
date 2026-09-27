@@ -502,7 +502,8 @@ bucket returns `429 RATE_LIMITED`.
 `REQUEST_CREATION_FAILED` (FS15), `SCHEDULE_CONFLICT`,
 `REQUEST_NOT_SCHEDULABLE`, `DEVICE_ALREADY_SCHEDULED` (FS18),
 `VISIT_STATUS_CONFLICT`, `VERSION_CONFLICT`, `WORK_RESULTS_INCOMPLETE`
-(FS23), `BILLING_NOT_CONFIGURED`, `CURRENCY_LOCKED` (FS10) — all follow the
+(FS23), `BILLING_NOT_CONFIGURED`, `CURRENCY_LOCKED` (FS10),
+`INSUFFICIENT_STOCK` (FS11) — all follow the
 standard error envelope above.
 
 ### Assumptions (OPEN DECISIONs resolved with a default)
@@ -1160,6 +1161,71 @@ multiples of stored amounts, so no rounding step exists anywhere.
 Every change to `currency` or `laborFeeMinor` writes a `CompanySettingsAudit` entry
 (`field`, `previousValue`, `newValue`, acting admin, time) in the same transaction as
 the change. No endpoint reads the audit yet.
+
+## Parts catalog and stock (FS11)
+
+> **Deviation from the FS11 ticket (product decision, 2026-09-27):** the ticket asked
+> for a plain availability flag with no stock counts. The product owner chose real
+> stock counts instead: each part has a `stockQuantity`, admins adjust it, and issuing
+> an invoice (FS25) decrements it for the parts fitted on repaired devices. `inStock`
+> is derived (`stockQuantity > 0`), never stored.
+
+Every endpoint below needs the company's billing settings (FS10) — without a currency
+and labor fee they answer `409 BILLING_NOT_CONFIGURED`.
+
+### Part DTO
+
+```json
+{ "id": "...", "name": "Fan Motor", "description": null, "unitPriceMinor": 45000,
+  "currency": "EGP", "inStock": true, "isActive": true }
+```
+
+Admin responses add `stockQuantity`. `currency` is the company's (locked, see FS10).
+
+### `GET /api/v1/catalog/parts?q=&available=&page=&pageSize=`
+
+Any authenticated role (customers see prices up front, technicians pick from it).
+Active parts of the caller's company only; out-of-stock parts stay listed with
+`inStock: false`. `q` is a case-insensitive literal substring of the name (never a
+regex); `available` is `true`/`false`. Paginated per the conventions above (default
+20, max 100), sorted by name. The stock count is never returned here.
+
+### `GET /api/v1/catalog/pricing`
+
+Any authenticated role: `{ "currency": "EGP", "laborFeeMinor": 15000 }` — the labor
+fee a repaired device costs on top of its parts.
+
+### Admin: `GET /api/v1/admin/parts?q=&available=&isActive=&page=&pageSize=`
+
+All parts including inactive ones, with `stockQuantity`.
+
+### Admin: `POST /api/v1/admin/parts`
+
+`{ name, description?, unitPriceMinor, stockQuantity?, isActive? }` -> `201`. Names are
+unique per company ignoring case and repeated spaces (`409 CONFLICT`). `stockQuantity`
+(default 0) is only settable here; an initial stock is written to the stock ledger.
+
+### Admin: `PATCH /api/v1/admin/parts/:id`
+
+Any of `name`, `description`, `unitPriceMinor`, `isActive`. **Stock is not editable
+here** (a `stockQuantity` field is stripped) so an edit can never overwrite a
+decrement an invoice made a moment earlier. A price change only affects future part
+selections — existing selections and issued invoices keep their snapshots. Parts are
+never deleted; `isActive: false` hides a part from the catalog and from new
+selections. Another company's part is `404`.
+
+### Admin: `POST /api/v1/admin/parts/:id/stock-adjustments`
+
+`{ delta, note? }` — a non-zero integer added to `stockQuantity`. A decrement is
+applied with a single guarded update (`stockQuantity >= -delta`), so concurrent
+adjustments and invoices can never drive stock below zero; one that would is
+`409 INSUFFICIENT_STOCK` and changes nothing. Returns the updated admin Part DTO.
+
+### Stock ledger
+
+Every stock change (initial stock, admin adjustment, invoice issuance) writes a
+`PartStockMovement` (`delta`, `quantityAfter`, `reason`, actor, time, and the invoice
+for issuance) in the same transaction as the change.
 
 ## Endpoints
 
