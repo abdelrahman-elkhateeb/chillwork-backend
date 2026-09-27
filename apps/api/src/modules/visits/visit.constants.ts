@@ -28,7 +28,15 @@ export const MIN_VISIT_DURATION_MS = 15 * 60 * 1000;
 export const MAX_VISIT_DURATION_MS = 8 * 60 * 60 * 1000;
 export const MAX_AVAILABILITY_WINDOW_MS = 31 * 24 * 60 * 60 * 1000;
 
-export const VISIT_EVENT_TYPES = ["VISIT_SCHEDULED", "TECHNICIAN_ASSIGNED"] as const;
+export const VISIT_EVENT_TYPES = [
+  "VISIT_SCHEDULED",
+  "TECHNICIAN_ASSIGNED",
+  // FS23 (technician work execution):
+  "VISIT_STARTED",
+  "VISIT_COMPLETED",
+  "WORK_RESULT_RECORDED",
+  "WORK_RESULT_UPDATED",
+] as const;
 export type VisitEventType = (typeof VISIT_EVENT_TYPES)[number];
 
 /**

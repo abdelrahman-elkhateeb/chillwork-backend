@@ -113,4 +113,16 @@ export class HttpError extends Error {
   static deviceAlreadyScheduled(message = "One or more devices are already part of an active visit"): HttpError {
     return new HttpError(409, "DEVICE_ALREADY_SCHEDULED", message);
   }
+
+  static visitStatusConflict(message = "The visit is not in a state that allows this action"): HttpError {
+    return new HttpError(409, "VISIT_STATUS_CONFLICT", message);
+  }
+
+  static versionConflict(message = "This work result was changed by another update, please refresh and retry"): HttpError {
+    return new HttpError(409, "VERSION_CONFLICT", message);
+  }
+
+  static workResultsIncomplete(message = "Every device on this visit needs a recorded result before it can be completed"): HttpError {
+    return new HttpError(409, "WORK_RESULTS_INCOMPLETE", message);
+  }
 }

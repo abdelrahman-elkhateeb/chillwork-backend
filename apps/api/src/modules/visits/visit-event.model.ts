@@ -10,6 +10,11 @@ const visitEventSchema = new Schema({
   actorId: { type: Schema.Types.ObjectId, ref: "User", required: true },
   technicianId: { type: Schema.Types.ObjectId, ref: "User", required: true },
   occurredAt: { type: Date, required: true },
+  // FS23: only set for WORK_RESULT_* events — which device, and the
+  // REPAIRED/FAILED outcome. No failureNote (free text) here — this is an
+  // audit trail, not a place to duplicate the work result's own content.
+  clientDeviceId: { type: String, default: null },
+  result: { type: String, default: null },
 });
 
 visitEventSchema.index({ companyId: 1, visitId: 1, occurredAt: 1 });
@@ -23,6 +28,8 @@ export interface VisitEventDocument {
   actorId: Types.ObjectId;
   technicianId: Types.ObjectId;
   occurredAt: Date;
+  clientDeviceId: string | null;
+  result: string | null;
 }
 
 export const VisitEvent = model<VisitEventDocument>("VisitEvent", visitEventSchema);
