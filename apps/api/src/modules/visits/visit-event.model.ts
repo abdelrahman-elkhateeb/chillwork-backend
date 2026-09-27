@@ -15,6 +15,10 @@ const visitEventSchema = new Schema({
   // audit trail, not a place to duplicate the work result's own content.
   clientDeviceId: { type: String, default: null },
   result: { type: String, default: null },
+  // FS22: only set for WORK_ITEM_* events — which proposed item. For
+  // WORK_ITEM_DECIDED, `result` above is reused to carry the decision
+  // (APPROVED/REJECTED) rather than adding a near-duplicate column.
+  workItemId: { type: String, default: null },
 });
 
 visitEventSchema.index({ companyId: 1, visitId: 1, occurredAt: 1 });
@@ -30,6 +34,7 @@ export interface VisitEventDocument {
   occurredAt: Date;
   clientDeviceId: string | null;
   result: string | null;
+  workItemId: string | null;
 }
 
 export const VisitEvent = model<VisitEventDocument>("VisitEvent", visitEventSchema);

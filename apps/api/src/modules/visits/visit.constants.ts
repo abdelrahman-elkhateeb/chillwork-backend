@@ -36,6 +36,9 @@ export const VISIT_EVENT_TYPES = [
   "VISIT_COMPLETED",
   "WORK_RESULT_RECORDED",
   "WORK_RESULT_UPDATED",
+  // FS22 (on-site work agreement / approved scope):
+  "WORK_ITEM_PROPOSED",
+  "WORK_ITEM_DECIDED",
 ] as const;
 export type VisitEventType = (typeof VISIT_EVENT_TYPES)[number];
 
