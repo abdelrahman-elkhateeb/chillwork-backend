@@ -36,9 +36,11 @@ apps/api/           the entire application (package.json, tsconfig, lockfile)
       visits/         admin visit scheduling + technician availability,
                        lock-based conflict prevention (FS18)
       technician/     technician-only read access to own assigned visits
-                      (FS19); start/complete visit lifecycle and per-device
-                      work results (REPAIRED/FAILED) with optimistic
-                      concurrency (FS23)
+                      (FS19); on-site proposed-work/customer-agreement
+                      model (FS22); start/complete visit lifecycle and
+                      per-device work results (REPAIRED/FAILED) with
+                      optimistic concurrency, gated by FS22's approved
+                      scope where one exists (FS23)
       health/         liveness check
   tests/             vitest + supertest + mongodb-memory-server
 docs/                API and architecture documentation
@@ -148,15 +150,27 @@ Run from `apps/api/`:
 - Technician visit read access (FS19, `GET /technician/visits[/:id]`) - see
   [docs/api.md](docs/api.md). Only the read half exists: photos/evidence wait on FS13,
   which does not exist in this repo.
+- On-site work agreement (FS22, `POST /technician/visits/:visitId/work-agreement/items`,
+  `POST /technician/visits/:visitId/work-agreement/decisions`,
+  `GET /technician/visits/:visitId/work-agreement`) - see [docs/api.md](docs/api.md)
+  "On-site work agreement (FS22)". Technician-recorded on-site agreement, not an
+  online customer approval page. Preserves Proposed Work != Approved Work: a
+  client can never submit a decision directly, and a decided item can never be
+  re-decided (scope changes are always a new proposed item). No parts catalog
+  (FS11 doesn't exist) and no photos (FS13 owns those, not referenced here).
 - Technician work execution (FS23, `POST /technician/visits/:id/start`,
   `POST /technician/visits/:id/complete`,
   `PUT /technician/visits/:visitId/work-results/:deviceId`,
   `GET /technician/visits/:visitId/work-results`) - see [docs/api.md](docs/api.md).
-  There is no Quote/Approval/billing model anywhere in this repo, so "required
-  work" is documented as a stand-in: every device in `Visit.deviceIds` (the
-  admin-assigned scope from FS18) must have a recorded result before a visit
-  can be completed. Payment, invoicing, photo evidence, and reassignment
-  endpoints are explicitly out of scope for FS23.
+  Recording `REPAIRED`/`FAILED` is now gated by FS22's approved scope wherever a
+  work agreement exists for a device (`409 WORK_NOT_APPROVED` otherwise); a
+  device FS22 hasn't been used on yet falls back to the original interim
+  boundary (`Visit.deviceIds`, the admin-assigned scope from FS18) — a
+  deliberate compatibility gap, documented in docs/api.md "Current
+  limitations", not full enforcement. Visit completion still requires every
+  device in `Visit.deviceIds` to have a result (unchanged by FS22). Payment,
+  invoicing, photo evidence, and reassignment endpoints remain out of scope for
+  FS23.
 - There is no lint tooling configured in this repository yet (no ESLint
-  config/script exists) — setting one up is out of scope for FS02/FS04/FS14/FS15/FS18/FS23.
+  config/script exists) — setting one up is out of scope for FS02/FS04/FS14/FS15/FS18/FS22/FS23.
 - Logs never include secrets, tokens, cookies, or raw request bodies.

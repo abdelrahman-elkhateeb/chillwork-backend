@@ -492,7 +492,7 @@ resolution, the uniqueness check, and password hashing, so an
 over-the-limit request is rejected as cheaply as possible. Exceeding any
 bucket returns `429 RATE_LIMITED`.
 
-### Error codes introduced by FS02 / FS04 / FS15 / FS18 / FS23
+### Error codes introduced by FS02 / FS04 / FS15 / FS18 / FS22 / FS23
 
 `INVALID_CREDENTIALS`, `SESSION_EXPIRED`, `SESSION_REVOKED`,
 `INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_REUSED`, `RATE_LIMITED`,
@@ -502,8 +502,9 @@ bucket returns `429 RATE_LIMITED`.
 `REQUEST_CREATION_FAILED` (FS15), `SCHEDULE_CONFLICT`,
 `REQUEST_NOT_SCHEDULABLE`, `DEVICE_ALREADY_SCHEDULED` (FS18),
 `VISIT_STATUS_CONFLICT`, `VERSION_CONFLICT`, `WORK_RESULTS_INCOMPLETE`
-(FS23) — all follow the
-standard error envelope above.
+(FS23), `WORK_NOT_APPROVED` (FS22) — all follow the
+standard error envelope above. `VERSION_CONFLICT` and `VISIT_STATUS_CONFLICT`
+are shared verbatim between FS22 and FS23 rather than duplicated per feature.
 
 ### Assumptions (OPEN DECISIONs resolved with a default)
 
@@ -1008,6 +1009,214 @@ any financial data (none exists yet).
 `status`, because `status` sits between the technician and `startAt` and the list would
 sort in memory. With a `status` the older index still applies.
 
+## On-site work agreement (FS22)
+
+Technician-only (`TECHNICIAN` role), the same authorization chain as FS19/FS23:
+`authenticate` -> `requireRole("TECHNICIAN")` -> `findAssignedVisit` (company +
+**current** `Visit.technicianId`). All mutating routes are behind the
+[CSRF/origin guard](#csrforigin-protection) and only allowed while the visit is
+`IN_PROGRESS` (`409 VISIT_STATUS_CONFLICT` otherwise, including once `COMPLETED`).
+
+> **What this is:** the customer's on-site agreement to a technician's proposed
+> work, recorded by the technician — **not** an online customer-facing approval
+> page, a Quote/Invoice document, or a payment flow. There is no customer account
+> action anywhere in this feature; every write is `req.auth`-scoped to the
+> assigned technician, and the "customer decision" is the technician's
+> contemporaneous record of what the customer said in person.
+>
+> This is the boundary the product flow describes as:
+> `Proposed Work -> Customer Agreement -> Approved Scope`, feeding FS23 (actual
+> work) below and, eventually, FS25 (invoice) — neither of which this feature
+> implements.
+
+### Domain model
+
+One `WorkAgreement` document per visit (`companyId`+`visitId` unique), holding an
+append-mostly array of `items`. An item is never deleted, and once decided its
+`decision`/`decidedAt`/`decidedById` are never rewritten — additional or changed
+work is always a **new** proposed item (see "Scope changes" below), never a
+mutation of an old one. That is what keeps the whole document an auditable
+history rather than a "current state" blob that forgets what was rejected.
+
+Each item:
+
+```json
+{
+  "itemId": "...",
+  "clientDeviceId": "d1",
+  "category": "PART_REPLACEMENT",
+  "description": "Replace compressor",
+  "partIdentifier": "COMP-9",
+  "quantity": 1,
+  "unitPriceMinor": 4500,
+  "estimatedTotalMinor": 4500,
+  "currency": "EGP",
+  "decision": "PROPOSED",
+  "proposedAt": "2026-09-27T10:00:00.000Z",
+  "decidedAt": null
+}
+```
+
+`category` is one of `PART_REPLACEMENT`, `LABOR`, `MAINTENANCE`, `OTHER`.
+`clientDeviceId` is null for a visit-level item not tied to one device (e.g. a
+general maintenance charge); when present it must be in both `Visit.deviceIds`
+and `ServiceRequest.devices[].clientDeviceId` — the same device-identity rule as
+FS23 (there is still no separate Device collection).
+
+**Money:** `estimatedTotalMinor` is always server-computed as
+`quantity * unitPriceMinor` in integer minor units — there is no client-supplied
+total anywhere on the wire, and negative/zero quantities and negative prices are
+rejected by validation. `currency` is a fixed `"EGP"` default for every
+agreement; there is no `Company.currency` field yet (FS10 — company settings —
+does not exist), so this is a documented placeholder, not a real multi-currency
+system.
+
+**Decision states:** `PROPOSED` (the only state the server ever assigns at
+creation — a client can never submit `decision` on a proposal; the request
+schema is `.strict()` and rejects it as `VALIDATION_ERROR`), `APPROVED`,
+`REJECTED`. A decision is one-way: deciding an item that is not currently
+`PROPOSED` is rejected with `VALIDATION_ERROR` (`fieldErrors` names the bad
+`itemId`). Only `APPROVED` items ever count toward `approvedTotalMinor`.
+
+### `POST /api/v1/technician/visits/:visitId/work-agreement/items`
+
+Adds one or more proposed items.
+
+```json
+{ "version": 0, "items": [
+  { "clientDeviceId": "d1", "category": "PART_REPLACEMENT", "description": "Replace compressor", "quantity": 1, "unitPriceMinor": 4500 }
+] }
+```
+
+Response is the full current agreement (see "Reading the agreement" below).
+
+### `POST /api/v1/technician/visits/:visitId/work-agreement/decisions`
+
+Records the customer's decision for one or more currently-`PROPOSED` items in one
+call (e.g. approve one item and reject another from the same on-site
+conversation):
+
+```json
+{ "version": 1, "decisions": [
+  { "itemId": "...", "decision": "APPROVED" },
+  { "itemId": "...", "decision": "REJECTED" }
+] }
+```
+
+`404 NOT_FOUND` if no agreement exists yet for this visit; `VALIDATION_ERROR` if
+any targeted item doesn't exist or was already decided.
+
+### Versioning
+
+`WorkAgreement.version` is a client-facing optimistic-concurrency counter
+(unrelated to Mongoose's internal `__v`), following the same convention as
+`WorkResult.version`: `0` means "I believe no agreement exists yet for this
+visit" (creates it); every accepted write — proposing items **or** recording
+decisions — increments the *whole document's* version by exactly one. This
+single counter is what "Agreement v1 / v2 / ..." means in product terms: each
+version is a snapshot of the full item history after one accepted change. A
+version mismatch is always `409 VERSION_CONFLICT`, never a silently-lost update.
+
+### Scope changes
+
+Additional or changed work discovered after an agreement already exists is
+**always** a new call to `.../work-agreement/items` (a new proposed item), never
+a mutation of a previously-decided one:
+
+```
+Agreement v1: compressor - APPROVED, board - REJECTED
+   ↓ (new proposal)
+Agreement v2: compressor - APPROVED, board - REJECTED, maintenance - PROPOSED
+   ↓ (new decision)
+Agreement v3: compressor - APPROVED, board - REJECTED, maintenance - APPROVED
+```
+
+The compressor and board items are untouched by the later calls — old approved
+(and rejected) items remain intact and auditable indefinitely.
+
+### Reading the agreement
+
+`GET /api/v1/technician/visits/:visitId/work-agreement` (and the response of
+both mutating endpoints above) returns:
+
+```json
+{
+  "data": {
+    "visitId": "...",
+    "version": 2,
+    "currency": "EGP",
+    "items": [ { "itemId": "...", "decision": "APPROVED", "...": "..." } ],
+    "approvedTotalMinor": 4500
+  }
+}
+```
+
+`approvedTotalMinor` is a read-time convenience sum over currently-`APPROVED`
+items — it is **not** an invoice, is never persisted, and is not authoritative
+for billing; FS25 (invoice, not implemented here) is expected to compute its own
+totals rather than trust this field. If no agreement exists yet, this returns an
+empty, version-`0` view rather than `404` — "nothing proposed yet" is a valid
+state for an `IN_PROGRESS` visit.
+
+### Never returned to technicians
+
+`proposedById`, `decidedById`, `companyId`/`requestId`/`visitId` of anything
+other than the resource named in the URL. The technician who proposed or decided
+an item is recorded (for audit — see `VisitEvent` below) but never surfaced back
+in any FS22 response, matching FS23's `recordedById` convention.
+
+### Audit trail
+
+Every accepted write also records one `VisitEvent` per item —
+`WORK_ITEM_PROPOSED` or `WORK_ITEM_DECIDED` — with `clientDeviceId` and
+`workItemId` set, and (for `WORK_ITEM_DECIDED`) the existing generic `result`
+string field reused to carry `"APPROVED"`/`"REJECTED"` rather than adding a
+near-duplicate column. As with every other `VisitEvent`, this is audit-only and
+is never consulted for authorization.
+
+### FS22 -> FS23 boundary
+
+`recordWorkResult` (FS23) additionally validates a device against this
+agreement, in `work-result.service.ts`'s `assertDeviceWithinApprovedScope`:
+
+* **No `WorkAgreement` exists for this visit, or none of its items name this
+  device:** FS22 has not been used for this device — falls back to FS23's
+  original interim boundary (`Visit.deviceIds` + request scope only). This is a
+  deliberate compatibility fallback, not full enforcement — see "Current
+  limitations" below.
+* **Items exist for the device but none has been decided yet:** every write is
+  rejected with `409 WORK_NOT_APPROVED` — nothing can be recorded while the
+  customer's decision is still pending.
+* **Recording `REPAIRED`:** requires at least one `APPROVED` item for that
+  device, else `409 WORK_NOT_APPROVED`. A technician can never execute and bill
+  work nothing was ever approved for.
+* **Recording `FAILED`:** only requires the device to have been decided at all —
+  a device whose only item was `REJECTED` can still get
+  `FAILED`/`CUSTOMER_REFUSED`, because that rejection *is* the refusal FS23
+  documents (see "Technician work execution (FS23)" below, "Visit lifecycle").
+
+### Current limitations
+
+* **The fallback above is a real, deliberate gap, not an oversight.** FS23 was
+  implemented and shipped before FS22 existed, with 43 passing tests that never
+  create a `WorkAgreement`. Making the FS22 gate unconditional would break every
+  one of those scenarios (and every visit that predates FS22 adoption) with no
+  migration path — there is no FS21 (inspection) yet to guarantee a proposal
+  happens before execution. The gate is real and enforced **once a technician
+  actually proposes work for a device**; until then, FS18's original
+  `Visit.deviceIds` boundary still applies unchanged.
+* **`completeVisit`'s required-device set is intentionally unchanged** — it
+  still requires every device in `Visit.deviceIds` to have a work result, not
+  "every device with a decided agreement item." Changing that would need a
+  product decision this task did not make (what happens to a device that was
+  never proposed/decided at all — must it still block completion?) and risks
+  diverging from the already-tested FS23 completion behavior. Flagged as a
+  remaining decision for whenever FS21 exists and visits are guaranteed to go
+  through inspection first.
+* No photos (`FS13` owns photo evidence; none is referenced here), no parts
+  catalog/stock validation (`FS11` does not exist — `partIdentifier` is a free
+  string), no invoice/payment logic (`FS25`/`FS26` are not implemented here).
+
 ## Technician work execution (FS23)
 
 Technician-only (`TECHNICIAN` role), same authorization chain as FS19:
@@ -1016,13 +1225,14 @@ Technician-only (`TECHNICIAN` role), same authorization chain as FS19:
 cached/earlier fetch). All mutating routes below are also behind the
 [CSRF/origin guard](#csrforigin-protection).
 
-> **Dependency note:** there is no Quote/Approval model in this repository. FS23
-> therefore does not — and cannot — validate "approved work" or compute anything
-> billable. It records what a technician actually did, per device, using
-> `Visit.deviceIds` (the set an admin already assigned to the visit) as the closest
-> existing stand-in for "the work this visit covers." A later billing feature
-> reads this data; nothing here calculates money, and no photo/evidence handling
-> is included (FS13 still doesn't exist).
+> **Dependency note:** FS22 ("On-site work agreement," above) now exists and
+> supplies a real approved-scope check — see "FS22 -> FS23 boundary" above for
+> exactly what is and is not enforced. `Visit.deviceIds` (the set an admin
+> already assigned to the visit) remains the boundary for **completing** a visit
+> and for any device FS22 has not been used on yet; it is no longer the only
+> word on whether a specific `REPAIRED`/`FAILED` write is allowed. FS23 still
+> does not compute anything billable — that remains downstream (FS25), and no
+> photo/evidence handling is included (FS13 still doesn't exist).
 
 ### Visit lifecycle transitions
 
