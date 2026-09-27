@@ -492,7 +492,7 @@ resolution, the uniqueness check, and password hashing, so an
 over-the-limit request is rejected as cheaply as possible. Exceeding any
 bucket returns `429 RATE_LIMITED`.
 
-### Error codes introduced by FS02 / FS04 / FS15 / FS18 / FS23
+### Error codes introduced by FS02 / FS04 / FS15 / FS18 / FS23 / FS10
 
 `INVALID_CREDENTIALS`, `SESSION_EXPIRED`, `SESSION_REVOKED`,
 `INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_REUSED`, `RATE_LIMITED`,
@@ -502,7 +502,7 @@ bucket returns `429 RATE_LIMITED`.
 `REQUEST_CREATION_FAILED` (FS15), `SCHEDULE_CONFLICT`,
 `REQUEST_NOT_SCHEDULABLE`, `DEVICE_ALREADY_SCHEDULED` (FS18),
 `VISIT_STATUS_CONFLICT`, `VERSION_CONFLICT`, `WORK_RESULTS_INCOMPLETE`
-(FS23) — all follow the
+(FS23), `BILLING_NOT_CONFIGURED`, `CURRENCY_LOCKED` (FS10) — all follow the
 standard error envelope above.
 
 ### Assumptions (OPEN DECISIONs resolved with a default)
@@ -1118,6 +1118,48 @@ work-result write.
 
 `recordedById`, `visitId`/`requestId`/`companyId` of anything other than the
 resource named in the URL, and any cost/price/billable field (none exists).
+
+## Company settings and labor fee (FS10)
+
+Admin-only (`ADMIN` role; `CUSTOMER`/`TECHNICIAN` get `403 FORBIDDEN`). The company
+is always `req.auth.companyId`; a `companyId` in the body is stripped.
+
+### `GET /api/v1/admin/company-settings`
+
+```json
+{ "data": { "name": "Cool Air", "contact": { "phone": "+201000000000", "email": "ops@coolair.example" },
+  "timezone": "Africa/Cairo", "currency": "EGP", "laborFeeMinor": 15000 } }
+```
+
+A new company starts with `currency: null` and `laborFeeMinor: null`. Until both are
+set, every pricing flow (catalog, part selection, invoicing) answers
+`409 BILLING_NOT_CONFIGURED` instead of guessing a currency or a fee.
+
+### `PATCH /api/v1/admin/company-settings`
+
+Any subset of `name`, `contact: { phone?, email? }`, `timezone` (IANA), `currency`,
+`laborFeeMinor`; at least one field is required. `null` clears a contact field.
+Behind the CSRF/origin guard. Returns the full settings object.
+
+- `currency` is one of `EGP`, `SAR`, `AED`, `USD`, `EUR`. **It is locked once set**
+  (`409 CURRENCY_LOCKED`): catalog prices and every stored snapshot are amounts of
+  that currency's minor unit, so switching it would silently reinterpret them.
+- `laborFeeMinor` is a non-negative integer (max `1_000_000_000`). It is charged
+  once per `REPAIRED` device and never for a `FAILED` one (no-fix-no-fee).
+- Changing `timezone` affects visits booked afterwards only; each visit keeps the
+  zone it was booked in (FS18).
+
+### Money and rounding
+
+All money is an integer count of the company currency's minor unit (every supported
+currency has 2 decimals, so `15000` = 150.00). Totals are only ever sums and integer
+multiples of stored amounts, so no rounding step exists anywhere.
+
+### Audit
+
+Every change to `currency` or `laborFeeMinor` writes a `CompanySettingsAudit` entry
+(`field`, `previousValue`, `newValue`, acting admin, time) in the same transaction as
+the change. No endpoint reads the audit yet.
 
 ## Endpoints
 
