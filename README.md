@@ -23,12 +23,15 @@ apps/api/           the entire application (package.json, tsconfig, lockfile)
     db/              cached Mongoose connection
     middleware/      request id, 404, centralized error handler, require-db,
                       authenticate (server-side session validation), csrf-origin
-    lib/             HttpError, response envelope helpers
+    lib/             HttpError, response envelope, Idempotency-Key helpers
     modules/
       auth/          login/refresh/logout, Session model, JWT + refresh
                       token primitives, MongoDB-backed login throttling
       users/          User model, password hashing
-      companies/      Company model
+      companies/      Company model; admin company settings + labor fee (FS10)
+      catalog/        parts catalog, admin part management and stock
+                       ledger (FS11)
+      billing/        final invoice preview/issuance (FS25)
       ai/             Gemini device analysis service (analyzeDevices()) —
                        internal only, no HTTP route; see docs/api.md
       requests/       POST /requests — validated multi-device service
@@ -38,8 +41,10 @@ apps/api/           the entire application (package.json, tsconfig, lockfile)
       technician/     technician-only read access to own assigned visits
                       (FS19); start/complete visit lifecycle and per-device
                       work results (REPAIRED/FAILED) with optimistic
-                      concurrency (FS23)
+                      concurrency (FS23); per-device part selection;
+                      allowedActions
       health/         liveness check
+    scripts/          guarded demo seed/reset CLI (FS34)
   tests/             vitest + supertest + mongodb-memory-server
 docs/                API and architecture documentation
 ```
@@ -83,6 +88,8 @@ cp .env.example .env
 | `GEMINI_RATE_LIMIT_WINDOW_MS` | no | `60000` | Gemini throttle window, ms |
 | `REQUEST_CREATE_MAX_ATTEMPTS_PER_USER` | no | `20` | `POST /requests` throttle, per customer |
 | `REQUEST_CREATE_WINDOW_MS` | no | `3600000` | `POST /requests` throttle window, ms (1 hour) |
+| `DEMO_SEED_DATABASE` | seed only | — | must equal the connected database name for `pnpm seed:demo` |
+| `DEMO_SEED_PASSWORD` | seed only | — | password for every demo account, >= 12 chars |
 
 Startup fails fast with a clear error message if required variables are
 missing or invalid (see `src/config/env.ts`). See
@@ -119,6 +126,8 @@ Run from `apps/api/`:
   multi-document transaction `POST /requests` uses; no real database or
   `.env` needed)
 - `pnpm start` — run the compiled build (`dist/server.js`)
+- `pnpm seed:demo [--reset]` — seed (or wipe and re-seed) the synthetic demo
+  company; guarded, see [docs/demo.md](docs/demo.md)
 
 ## Notes
 
@@ -154,6 +163,12 @@ Run from `apps/api/`:
   admin-assigned scope from FS18) must have a recorded result before a visit
   can be completed. Payment, invoicing, photo evidence, and reassignment
   endpoints are explicitly out of scope for FS23.
+- Billing (FS10 company settings/labor fee, FS11 parts catalog with stock,
+  technician part selection, FS25 invoices) — see [docs/api.md](docs/api.md).
+  FS11 deliberately tracks stock counts (a product decision that departs from
+  the ticket's availability flag); issuing an invoice decrements stock.
+  Payments (FS26) and the customer invoice view (FS27) are not implemented.
+- Synthetic demo data (FS34, `pnpm seed:demo`) — see [docs/demo.md](docs/demo.md).
 - There is no lint tooling configured in this repository yet (no ESLint
   config/script exists) — setting one up is out of scope for FS02/FS04/FS14/FS15/FS18/FS23.
 - Logs never include secrets, tokens, cookies, or raw request bodies.

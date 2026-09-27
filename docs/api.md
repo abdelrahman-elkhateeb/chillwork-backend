@@ -1365,6 +1365,13 @@ Visit document, price the invoice, take stock, write the invoice, the stock ledg
 The issued invoice, or `404` if none has been issued yet. A customer-facing invoice
 view is FS27 and not implemented.
 
+## Demo data (FS34)
+
+`pnpm seed:demo [--reset]` seeds a synthetic demo company, accounts, catalog,
+requests, visits and invoices, plus a test-only second tenant. It is a guarded CLI
+script with no HTTP endpoint. See [demo.md](demo.md) for the guards, the seeded
+data and a walkthrough.
+
 ## Endpoints
 
 ### `GET /api/v1/health`
