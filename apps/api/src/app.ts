@@ -9,6 +9,7 @@ import { catalogRouter } from "./modules/catalog/catalog.routes.js";
 import { companySettingsRouter } from "./modules/companies/company-settings.routes.js";
 import { healthRouter } from "./modules/health/health.routes.js";
 import { requestsRouter } from "./modules/requests/request.routes.js";
+import { staffRouter } from "./modules/staff/staff.routes.js";
 import { technicianRouter } from "./modules/technician/technician-visit.routes.js";
 import { visitsRouter } from "./modules/visits/visit.routes.js";
 
@@ -37,6 +38,7 @@ export function createApp(): Express {
   app.use("/api/v1", requireDb, companySettingsRouter);
   app.use("/api/v1", requireDb, catalogRouter);
   app.use("/api/v1", requireDb, invoiceRouter);
+  app.use("/api/v1", requireDb, staffRouter);
 
   // Future feature routers that need the database are mounted here, each
   // guarded by the requireDb middleware, e.g.:

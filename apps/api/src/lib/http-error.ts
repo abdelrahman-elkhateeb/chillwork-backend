@@ -134,6 +134,18 @@ export class HttpError extends Error {
     return new HttpError(409, "INSUFFICIENT_STOCK", message, fieldErrors);
   }
 
+  static technicianNotActivated(message = "This technician has not activated their account yet"): HttpError {
+    return new HttpError(409, "TECHNICIAN_NOT_ACTIVATED", message);
+  }
+
+  static technicianAlreadyActivated(message = "This technician has already activated their account"): HttpError {
+    return new HttpError(409, "TECHNICIAN_ALREADY_ACTIVATED", message);
+  }
+
+  static invalidActivationToken(message = "This activation link is invalid or has expired"): HttpError {
+    return new HttpError(400, "INVALID_ACTIVATION_TOKEN", message);
+  }
+
   static invoiceAlreadyIssued(message = "An invoice has already been issued for this visit"): HttpError {
     return new HttpError(409, "INVOICE_ALREADY_ISSUED", message);
   }

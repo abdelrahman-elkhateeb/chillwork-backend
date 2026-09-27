@@ -31,9 +31,19 @@ const userSchema = new Schema(
     role: { type: String, enum: USER_ROLES, required: true },
     companyId: { type: Schema.Types.ObjectId, ref: "Company", required: true, index: true },
     isActive: { type: Boolean, required: true, default: true },
+    // FS09: true for an invited technician who has not set their own
+    // password yet (their passwordHash is a random, unusable placeholder
+    // and isActive is false). Explicit rather than derived from
+    // activatedAt, so accounts created before FS09 (default false) are
+    // never mistaken for pending invitations.
+    pendingActivation: { type: Boolean, required: true, default: false },
+    activatedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
+
+// FS09 admin technician list: a company's technicians by name.
+userSchema.index({ companyId: 1, role: 1, name: 1 });
 
 export interface UserDocument {
   _id: Types.ObjectId;
@@ -44,6 +54,8 @@ export interface UserDocument {
   role: UserRole;
   companyId: Types.ObjectId;
   isActive: boolean;
+  pendingActivation: boolean;
+  activatedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
