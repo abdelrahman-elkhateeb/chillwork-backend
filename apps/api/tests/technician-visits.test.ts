@@ -3,6 +3,7 @@ import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { Session } from "../src/modules/auth/session.model.js";
+import { Invoice } from "../src/modules/billing/invoice.model.js";
 import { User } from "../src/modules/users/user.model.js";
 import { VisitEvent } from "../src/modules/visits/visit-event.model.js";
 import { Visit } from "../src/modules/visits/visit.model.js";
@@ -192,7 +193,7 @@ describe("detail isolation", () => {
       workTypes: ["INSPECTION", "REPAIR"],
       customer: { name: "Jane Customer", phone: "+15550001111" },
       address: "1 Main St",
-      allowedActions: [],
+      allowedActions: ["START_VISIT"],
     });
   });
 
@@ -357,10 +358,41 @@ describe("DTO safety and AI analysis", () => {
     }
   });
 
-  it("returns an empty allowedActions (no actions exist yet)", async () => {
+  it.each([
+    ["SCHEDULED", ["START_VISIT"]],
+    ["IN_PROGRESS", ["SELECT_PARTS", "RECORD_WORK_RESULT", "COMPLETE_VISIT"]],
+    ["COMPLETED", ["ISSUE_INVOICE"]],
+    ["CANCELLED", []],
+  ] as const)("derives allowedActions for a %s visit", async (status, expected) => {
     const w = await world();
-    await visitFor(w, w.techA.user._id);
+    const v = await visitFor(w, w.techA.user._id, { status });
+    expect((await list(w.techA.cookies)).body.data[0].allowedActions).toEqual(expected);
+    expect((await detail(w.techA.cookies, v._id)).body.data.allowedActions).toEqual(expected);
+  });
+
+  it("drops ISSUE_INVOICE once the visit's invoice exists", async () => {
+    const w = await world();
+    const v = await visitFor(w, w.techA.user._id, { status: "COMPLETED" });
+    await Invoice.create({
+      companyId: w.company._id,
+      visitId: v._id,
+      requestId: w.req._id,
+      customerId: w.customer.user._id,
+      issuedById: w.techA.user._id,
+      reference: `INV-${randomUUID().slice(0, 8)}`,
+      idempotencyKey: "k",
+      currency: "EGP",
+      laborFeeMinor: 0,
+      devices: [],
+      subtotalMinor: 0,
+      laborMinor: 0,
+      totalMinor: 0,
+      status: "CLOSED",
+      paymentState: "NOT_REQUIRED",
+      issuedAt: new Date(),
+    });
     expect((await list(w.techA.cookies)).body.data[0].allowedActions).toEqual([]);
+    expect((await detail(w.techA.cookies, v._id)).body.data.allowedActions).toEqual([]);
   });
 });
 
