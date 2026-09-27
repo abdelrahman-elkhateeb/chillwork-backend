@@ -2,12 +2,8 @@
  * FS15 — service request creation constants.
  */
 
-// Idempotency-Key header ----------------------------------------------------
-export const MAX_IDEMPOTENCY_KEY_LENGTH = 200;
-// Alphanumeric plus -/_ only — this becomes part of a MongoDB query value
-// and, indirectly, of logged metadata; restricting the charset avoids any
-// ambiguity, not because a wider charset would be unsafe on its own.
-export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{1,200}$/;
+// Idempotency-Key header: format and parsing live in lib/idempotency-key.ts
+// (shared with FS25 invoice issuance).
 
 /**
  * How long an abandoned (crashed-before-completing) reservation blocks its

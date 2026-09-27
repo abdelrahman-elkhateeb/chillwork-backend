@@ -133,4 +133,8 @@ export class HttpError extends Error {
   static insufficientStock(message = "Not enough stock for one or more parts", fieldErrors?: FieldErrors): HttpError {
     return new HttpError(409, "INSUFFICIENT_STOCK", message, fieldErrors);
   }
+
+  static invoiceAlreadyIssued(message = "An invoice has already been issued for this visit"): HttpError {
+    return new HttpError(409, "INVOICE_ALREADY_ISSUED", message);
+  }
 }

@@ -4,6 +4,7 @@ import { notFoundHandler } from "./middleware/not-found.js";
 import { requestId } from "./middleware/request-id.js";
 import { requireDb } from "./middleware/require-db.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
+import { invoiceRouter } from "./modules/billing/invoice.routes.js";
 import { catalogRouter } from "./modules/catalog/catalog.routes.js";
 import { companySettingsRouter } from "./modules/companies/company-settings.routes.js";
 import { healthRouter } from "./modules/health/health.routes.js";
@@ -35,6 +36,7 @@ export function createApp(): Express {
   app.use("/api/v1", requireDb, technicianRouter);
   app.use("/api/v1", requireDb, companySettingsRouter);
   app.use("/api/v1", requireDb, catalogRouter);
+  app.use("/api/v1", requireDb, invoiceRouter);
 
   // Future feature routers that need the database are mounted here, each
   // guarded by the requireDb middleware, e.g.:
