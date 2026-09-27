@@ -818,6 +818,63 @@ stops a single customer from being the one who exhausts it. Checked
 before the idempotency reservation, so a throttled call never reserves
 a key or reaches Gemini.
 
+## Admin request triage (FS17)
+
+Admin-only and read-only (`CUSTOMER`/`TECHNICIAN` get `403`). Everything is scoped to
+`req.auth.companyId`.
+
+### `GET /api/v1/admin/requests?search=&status=&page=&pageSize=`
+
+The company's requests, newest first (`createdAt`, then id — stable paging). Default
+20, max 100; unknown filters are `400`.
+
+- `search` (1–100 chars, literal text, never a regex) matches a **reference prefix**
+  (case-insensitive: `sr-k9x` finds `SR-K9XQAB27`) or a customer **of this company**
+  whose name, email or phone contains it.
+- `status` is a request status (only `SUBMITTED` exists today).
+
+```json
+{ "data": [{ "requestId": "...", "reference": "SR-7K9XQAB2", "status": "SUBMITTED",
+  "createdAt": "...", "address": "12 Nile Street, Cairo",
+  "customer": { "id": "...", "name": "Mona Customer", "phone": "+201000000004" },
+  "deviceCount": 2, "unscheduledDeviceCount": 1, "visitCount": 1, "nextActions": ["SCHEDULE_VISIT"] }],
+  "meta": { "page": 1, "pageSize": 20, "total": 1 } }
+```
+
+`customer.phone` is the contact number given on the request. A device is
+"unscheduled" until a visit that is not `CANCELLED` covers it.
+
+### `GET /api/v1/admin/requests/:id`
+
+```json
+{ "data": { "requestId": "...", "reference": "SR-7K9XQAB2", "status": "SUBMITTED", "createdAt": "...",
+  "address": "...", "contactPhone": "+201000000004",
+  "customer": { "id": "...", "name": "Mona Customer", "email": "mona@example.com", "phone": "+201000000004" },
+  "devices": [{ "clientDeviceId": "living-room", "label": "Living room AC", "brand": null, "model": null,
+    "originalDescription": "exactly what the customer typed",
+    "aiAnalysis": { "status": "SUCCESS", "errorCode": null,
+      "analysis": { "summary": "...", "possibleCauses": [], "missingInformation": [], "inspectionQuestions": [] } },
+    "visitId": "..." }],
+  "visits": [{ "visitId": "...", "technician": { "id": "...", "name": "Omar Technician" },
+    "startAt": "...", "endAt": "...", "timezone": "Africa/Cairo", "status": "COMPLETED",
+    "deviceIds": ["living-room"], "workTypes": ["INSPECTION", "REPAIR"], "outcome": "FULLY_REPAIRED",
+    "invoice": { "id": "...", "reference": "INV-...", "currency": "EGP", "totalMinor": 68000,
+      "status": "ISSUED", "paymentState": "UNPAID" } }],
+  "unscheduledDeviceCount": 0, "nextActions": [] } }
+```
+
+- The customer's `originalDescription` and the AI output are separate fields. When the
+  analysis failed, `aiAnalysis.analysis` is `null` (never invented) and
+  `status`/`errorCode` say why — the admin can still triage from the original text.
+  Model and prompt version are never returned.
+- `devices[].visitId` is the latest non-cancelled visit covering the device, or `null`.
+- `visits[].outcome` is FS23's aggregate (`null` until every device on the visit has a
+  result); `invoice` is the FS25 invoice summary or `null`.
+- `nextActions` is `["SCHEDULE_VISIT"]` while the request is schedulable and a device
+  is uncovered. There are no other admin lifecycle actions yet (cancel, reschedule and
+  reassign are FS20), so no status transition can be forced through this API.
+- Another company's request, a missing id and a malformed id are all the same `404`.
+
 ## Visit scheduling (FS18)
 
 Admin-only (`ADMIN` role; `CUSTOMER`/`TECHNICIAN` get `403 FORBIDDEN`). Company and
