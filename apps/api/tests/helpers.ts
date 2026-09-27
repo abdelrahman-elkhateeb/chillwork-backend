@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { Types } from "mongoose";
 import request, { type Response, type Test } from "supertest";
+import { Part, partNameKey } from "../src/modules/catalog/part.model.js";
 import { Company } from "../src/modules/companies/company.model.js";
 import { ServiceRequest } from "../src/modules/requests/request.model.js";
 import { hashPassword } from "../src/modules/users/password.js";
@@ -155,6 +156,31 @@ export async function createServiceRequest(
         errorCode: device.analysis ? null : "GEMINI_TIMEOUT",
       },
     })),
+  });
+}
+
+/** Sets the FS10 billing settings directly (no admin/HTTP involved). */
+export async function configureBilling(companyId: unknown, settings: { currency?: string; laborFeeMinor?: number } = {}) {
+  return Company.findOneAndUpdate(
+    { _id: companyId },
+    { $set: { currency: settings.currency ?? "EGP", laborFeeMinor: settings.laborFeeMinor ?? 15000 } },
+    { new: true }
+  );
+}
+
+/** A persisted catalog Part inserted directly. */
+export async function createPart(
+  companyId: unknown,
+  overrides: { name?: string; unitPriceMinor?: number; stockQuantity?: number; isActive?: boolean } = {}
+) {
+  const name = overrides.name ?? unique("Part");
+  return Part.create({
+    companyId,
+    name,
+    nameKey: partNameKey(name),
+    unitPriceMinor: overrides.unitPriceMinor ?? 5000,
+    stockQuantity: overrides.stockQuantity ?? 10,
+    isActive: overrides.isActive ?? true,
   });
 }
 
