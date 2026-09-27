@@ -121,4 +121,12 @@ export class HttpError extends Error {
   static workResultsIncomplete(message = "Every device on this visit needs a recorded result before it can be completed"): HttpError {
     return new HttpError(409, "WORK_RESULTS_INCOMPLETE", message);
   }
+
+  static billingNotConfigured(message = "Billing settings (currency and labor fee) are not configured"): HttpError {
+    return new HttpError(409, "BILLING_NOT_CONFIGURED", message);
+  }
+
+  static currencyLocked(message = "The company currency cannot be changed once it is set"): HttpError {
+    return new HttpError(409, "CURRENCY_LOCKED", message);
+  }
 }
