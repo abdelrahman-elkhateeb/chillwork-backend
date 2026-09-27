@@ -35,7 +35,10 @@ apps/api/           the entire application (package.json, tsconfig, lockfile)
       ai/             Gemini device analysis service (analyzeDevices()) —
                        internal only, no HTTP route; see docs/api.md
       requests/       POST /requests — validated multi-device service
-                       request creation, idempotency, FS14 integration
+                       request creation, idempotency, FS14 integration;
+                       admin request list/detail (FS17)
+      staff/          admin technician management + link-based activation
+                       (FS09)
       visits/         admin visit scheduling + technician availability,
                        lock-based conflict prevention (FS18)
       technician/     technician-only read access to own assigned visits
@@ -169,6 +172,10 @@ Run from `apps/api/`:
   the ticket's availability flag); issuing an invoice decrements stock.
   Payments (FS26) and the customer invoice view (FS27) are not implemented.
 - Synthetic demo data (FS34, `pnpm seed:demo`) — see [docs/demo.md](docs/demo.md).
+- Technician accounts (FS09): admins create them and get a one-time activation
+  token to share (there is no email service yet, FS07); the technician sets their
+  own password via `POST /auth/activate-technician`. Admin request triage (FS17) is
+  read-only — see [docs/api.md](docs/api.md).
 - There is no lint tooling configured in this repository yet (no ESLint
   config/script exists) — setting one up is out of scope for FS02/FS04/FS14/FS15/FS18/FS23.
 - Logs never include secrets, tokens, cookies, or raw request bodies.
