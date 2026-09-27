@@ -36,6 +36,9 @@ export const VISIT_EVENT_TYPES = [
   "VISIT_COMPLETED",
   "WORK_RESULT_RECORDED",
   "WORK_RESULT_UPDATED",
+  // Technician part selection and invoicing (FS11/FS25):
+  "DEVICE_PARTS_UPDATED",
+  "INVOICE_ISSUED",
 ] as const;
 export type VisitEventType = (typeof VISIT_EVENT_TYPES)[number];
 

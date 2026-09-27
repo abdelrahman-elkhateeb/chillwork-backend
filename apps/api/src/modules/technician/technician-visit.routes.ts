@@ -8,6 +8,7 @@ import {
   postCompleteVisit,
   postStartVisit,
 } from "./technician-visit.controller.js";
+import { getParts, putDeviceParts } from "./device-parts.controller.js";
 import { getWorkResults, putWorkResult } from "./work-result.controller.js";
 
 export const technicianRouter = Router();
@@ -18,6 +19,7 @@ const technician = [authenticate, requireRole("TECHNICIAN")] as const;
 technicianRouter.get("/technician/visits", ...technician, getTechnicianVisits);
 technicianRouter.get("/technician/visits/:id", ...technician, getTechnicianVisit);
 technicianRouter.get("/technician/visits/:visitId/work-results", ...technician, getWorkResults);
+technicianRouter.get("/technician/visits/:visitId/parts", ...technician, getParts);
 
 // Mutations (FS23): csrfOriginGuard first (cheap, no DB), then the same
 // authenticate/role chain. Every one of these re-runs the current
@@ -26,3 +28,9 @@ technicianRouter.get("/technician/visits/:visitId/work-results", ...technician, 
 technicianRouter.post("/technician/visits/:id/start", csrfOriginGuard, ...technician, postStartVisit);
 technicianRouter.post("/technician/visits/:id/complete", csrfOriginGuard, ...technician, postCompleteVisit);
 technicianRouter.put("/technician/visits/:visitId/work-results/:deviceId", csrfOriginGuard, ...technician, putWorkResult);
+technicianRouter.put(
+  "/technician/visits/:visitId/devices/:deviceId/parts",
+  csrfOriginGuard,
+  ...technician,
+  putDeviceParts
+);

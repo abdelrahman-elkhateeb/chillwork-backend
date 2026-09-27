@@ -130,7 +130,7 @@ export class HttpError extends Error {
     return new HttpError(409, "CURRENCY_LOCKED", message);
   }
 
-  static insufficientStock(message = "Not enough stock for one or more parts"): HttpError {
-    return new HttpError(409, "INSUFFICIENT_STOCK", message);
+  static insufficientStock(message = "Not enough stock for one or more parts", fieldErrors?: FieldErrors): HttpError {
+    return new HttpError(409, "INSUFFICIENT_STOCK", message, fieldErrors);
   }
 }
