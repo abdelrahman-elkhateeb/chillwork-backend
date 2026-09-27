@@ -894,7 +894,9 @@ the request's own creation:
 ```
 
 Only those five types appear. Assignment, work-result and part-selection events are
-internal, and no event carries an actor, a note or a result.
+internal, and no event carries an actor, a note or a result. Events of `CANCELLED`
+visits are left out, matching the detail endpoint (there is no cancellation event
+to show until FS20).
 
 ## Admin request triage (FS17)
 
@@ -1109,7 +1111,7 @@ Derived only from the visit's status and whether its invoice exists:
 | ------------ | ---------------- |
 | `SCHEDULED` | `START_VISIT` |
 | `IN_PROGRESS` | `SELECT_PARTS`, `RECORD_WORK_RESULT`, `COMPLETE_VISIT` |
-| `COMPLETED` | `ISSUE_INVOICE` until the invoice exists, then none |
+| `COMPLETED` | `SELECT_PARTS`, `ISSUE_INVOICE` until the invoice exists, then none |
 | `CANCELLED` | none |
 
 It is a UI hint, not an authorization decision: every action endpoint still re-checks
@@ -1391,7 +1393,7 @@ the catalog, invoice = parts + labor fee".
 Same authorization chain as FS23 (`TECHNICIAN` role, current assignment via
 `findAssignedVisit`, device must be in `Visit.deviceIds` and on the request —
 otherwise the uniform `404`), and the same serialization point: every write
-re-checks company + technician + `IN_PROGRESS` on the Visit document inside its
+re-checks company + technician + status on the Visit document inside its
 transaction. Requires billing settings (`409 BILLING_NOT_CONFIGURED`).
 
 ### `PUT /api/v1/technician/visits/:visitId/devices/:deviceId/parts`
@@ -1409,14 +1411,22 @@ from the catalog; a client-supplied price/total is stripped.
   snapshotted at the current catalog price. A part **already on** the device keeps
   the name/price snapshotted when it was first added — the agreed price — even if
   the catalog price changed or the part was deactivated since.
-- Every item needs `quantity <= stockQuantity` right now, otherwise
-  `409 INSUFFICIENT_STOCK` with `fieldErrors["items.N.quantity"]` and nothing is
-  saved. Stock is **not** reserved or decremented here; that happens atomically when
-  the invoice is issued.
+- **Availability:** every item must fit in `stockQuantity` minus the units already
+  picked for *other* devices (on this visit or any other) that are still pending: the
+  visit is not `CANCELLED`, its invoice has not been issued, and that device has not
+  been recorded `FAILED`. Otherwise `409 INSUFFICIENT_STOCK` with
+  `fieldErrors["items.N.quantity"] = ["Only N available"]` and nothing is saved. So two
+  picks can never both claim the last unit and leave a completed visit with an invoice
+  that can never be issued. The device's own previous list does not count against it.
+  Picks for the same part are serialized (a `part:<id>` lock, same pattern as FS18),
+  so concurrent picks can't both pass. Stock itself is only decremented when the
+  invoice is issued.
 - `version` has the same compare-and-set semantics as work results (0 = nothing
   selected yet; `409 VERSION_CONFLICT` on mismatch).
-- Only while the visit is `IN_PROGRESS` (`409 VISIT_STATUS_CONFLICT` otherwise).
-  Writes a `DEVICE_PARTS_UPDATED` VisitEvent.
+- Allowed while the visit is `IN_PROGRESS`, and still after it is `COMPLETED` until the
+  invoice is issued, so the technician can correct the list before invoicing
+  (`409 VISIT_STATUS_CONFLICT` for other statuses, `409 INVOICE_ALREADY_ISSUED` once
+  invoiced). Writes a `DEVICE_PARTS_UPDATED` VisitEvent.
 
 Response:
 
