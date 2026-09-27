@@ -503,7 +503,9 @@ bucket returns `429 RATE_LIMITED`.
 `REQUEST_NOT_SCHEDULABLE`, `DEVICE_ALREADY_SCHEDULED` (FS18),
 `VISIT_STATUS_CONFLICT`, `VERSION_CONFLICT`, `WORK_RESULTS_INCOMPLETE`
 (FS23), `BILLING_NOT_CONFIGURED`, `CURRENCY_LOCKED` (FS10),
-`INSUFFICIENT_STOCK` (FS11), `INVOICE_ALREADY_ISSUED` (FS25) — all follow the
+`INSUFFICIENT_STOCK` (FS11), `INVOICE_ALREADY_ISSUED` (FS25),
+`TECHNICIAN_NOT_ACTIVATED`, `TECHNICIAN_ALREADY_ACTIVATED`,
+`INVALID_ACTIVATION_TOKEN` (FS09) — all follow the
 standard error envelope above.
 
 ### Assumptions (OPEN DECISIONs resolved with a default)
@@ -1364,6 +1366,69 @@ Visit document, price the invoice, take stock, write the invoice, the stock ledg
 
 The issued invoice, or `404` if none has been issued yet. A customer-facing invoice
 view is FS27 and not implemented.
+
+## Technician management and activation (FS09)
+
+Admin-only except activation. Technicians are always created as `TECHNICIAN` in the
+admin's own company; `role`/`companyId`/`isActive` in a body are stripped.
+
+> **No email yet (FS07):** instead of an emailed invitation, creating a technician
+> returns a one-time `activationToken` that the admin passes on (e.g. as a link to the
+> frontend's activation page, `…/activate-technician?token=<token>`). The token is 256
+> random bits, only its SHA-256 hash is stored, it expires after 7 days, and it works
+> once. No password is ever chosen by, shown to, or sent through the admin.
+
+### Technician DTO
+
+```json
+{ "id": "...", "name": "Omar Technician", "email": "omar@example.com", "phone": "+201000000002",
+  "status": "ACTIVE", "activeVisitCount": 2, "createdAt": "2026-09-28T09:00:00.000Z" }
+```
+
+`status` is `INVITED` (created, not activated — cannot log in or be scheduled),
+`ACTIVE`, or `INACTIVE` (deactivated). `activeVisitCount` is the technician's
+`SCHEDULED`/`IN_PROGRESS` visits — after a deactivation, what still needs reassigning
+(FS20).
+
+### `GET /api/v1/admin/technicians?status=&search=&page=&pageSize=`
+
+The company's technicians sorted by name. `search` is a case-insensitive literal
+substring of name or email. Paginated (default 20, max 100); unknown filters are
+`400`. This is the list the admin picks from when scheduling (FS18).
+
+### `POST /api/v1/admin/technicians`
+
+`{ name, email, phone }` -> `201 { technician, invitation: { activationToken, expiresAt } }`.
+An email that already has an account (any role, any company) is `409 CONFLICT`.
+
+### `POST /api/v1/admin/technicians/:id/invitation`
+
+A fresh `{ activationToken, expiresAt }` for an `INVITED` technician (the previous
+unused token stops working). `409 TECHNICIAN_ALREADY_ACTIVATED` once they have
+activated.
+
+### `PATCH /api/v1/admin/technicians/:id`
+
+Any of `name`, `phone`, `isActive` (the email is the login and is not editable).
+Returns the technician DTO.
+
+- `isActive: false` revokes **all** of the technician's sessions at once (their next
+  request is `401` even with an unexpired JWT), revokes a pending invitation, and
+  blocks login and new scheduling. Visits are not touched: past and current
+  assignments keep their attribution.
+- `isActive: true` reactivates a deactivated technician. An `INVITED` technician
+  cannot be switched on (`409 TECHNICIAN_NOT_ACTIVATED`) — they have no password of
+  their own yet.
+- A customer, an admin or another company's user is `404`.
+
+### `POST /api/v1/auth/activate-technician`
+
+Public, behind the CSRF/origin guard and a per-IP throttle (10 per 15 minutes).
+`{ token, password }` (password: 8+ characters) -> `200 { "data": { "email": "..." } }`.
+Consumes the token and sets the technician's own password in one transaction; the
+technician then signs in with `POST /auth/login` (activation does not log in).
+Unknown, expired, used or superseded tokens all get the same
+`400 INVALID_ACTIVATION_TOKEN`.
 
 ## Demo data (FS34)
 
