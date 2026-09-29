@@ -9,7 +9,7 @@ import type { WorkResultDocument } from "./work-result.model.js";
 const MAX_DEVICE_ID_LENGTH = 200;
 
 /** Same shape as the ai/requests modules' clientDeviceId bound — this is that same id. */
-function requireDeviceIdParam(value: string | undefined): string {
+export function requireDeviceIdParam(value: string | undefined): string {
   if (!value || value.length === 0 || value.length > MAX_DEVICE_ID_LENGTH) {
     throw HttpError.notFound("Device not found on this visit");
   }

@@ -36,8 +36,12 @@ async function companyTimezone(companyId: Types.ObjectId): Promise<string> {
   return company?.timezone ?? "UTC";
 }
 
-/** Lock documents must exist before the transaction (an upsert inside it could race on the unique index). */
-async function ensureLocks(companyId: Types.ObjectId, keys: string[]): Promise<void> {
+/**
+ * Lock documents must exist before the transaction (an upsert inside it
+ * could race on the unique index). Also used for `part:<id>` locks by
+ * technician part selection.
+ */
+export async function ensureLocks(companyId: Types.ObjectId, keys: string[]): Promise<void> {
   for (const key of keys) {
     try {
       await ScheduleLock.updateOne({ companyId, key }, { $setOnInsert: { version: 0 } }, { upsert: true });

@@ -5,9 +5,36 @@ import type { VisitDocument } from "../visits/visit.model.js";
  * document. Deliberately absent: customer email/id, company/technician/
  * scheduler ids, request id, AI provider metadata (model, prompt version,
  * timestamps, error codes), locks, idempotency data, and anything
- * financial (none exists yet). `allowedActions` is an empty list until
- * technician actions exist — no action names are invented here.
+ * financial (prices live behind the parts/invoice endpoints).
  */
+
+/**
+ * What the technician can do next, derived only from the visit's status
+ * and whether its invoice exists. It is a UI hint: every action still
+ * re-checks assignment and status itself.
+ */
+export const TECHNICIAN_ACTIONS = [
+  "START_VISIT",
+  "SELECT_PARTS",
+  "RECORD_WORK_RESULT",
+  "COMPLETE_VISIT",
+  "ISSUE_INVOICE",
+] as const;
+export type TechnicianAction = (typeof TECHNICIAN_ACTIONS)[number];
+
+export function allowedActionsFor(status: VisitDocument["status"], invoiceIssued: boolean): TechnicianAction[] {
+  switch (status) {
+    case "SCHEDULED":
+      return ["START_VISIT"];
+    case "IN_PROGRESS":
+      return ["SELECT_PARTS", "RECORD_WORK_RESULT", "COMPLETE_VISIT"];
+    case "COMPLETED":
+      // Parts stay editable until the invoice exists (device-parts.service.ts).
+      return invoiceIssued ? [] : ["SELECT_PARTS", "ISSUE_INVOICE"];
+    default:
+      return [];
+  }
+}
 
 export interface RequestSummarySource {
   reference: string;
@@ -34,7 +61,7 @@ export interface TechnicianVisitListItem {
   customer: { name: string | null; phone: string | null };
   address: string | null;
   devices: TechnicianDeviceSummary[];
-  allowedActions: string[];
+  allowedActions: TechnicianAction[];
 }
 
 /** Only the devices attached to the visit, in the visit's order — never the whole request. */
@@ -61,7 +88,8 @@ function visitDevices(visit: VisitDocument, request: RequestSummarySource | null
 export function toTechnicianVisitListItem(
   visit: VisitDocument,
   request: RequestSummarySource | null,
-  customerName: string | null
+  customerName: string | null,
+  invoiceIssued: boolean
 ): TechnicianVisitListItem {
   return {
     id: visit._id.toString(),
@@ -76,7 +104,7 @@ export function toTechnicianVisitListItem(
     customer: { name: customerName, phone: request?.contactPhone ?? null },
     address: request?.address ?? null,
     devices: visitDevices(visit, request),
-    allowedActions: [],
+    allowedActions: allowedActionsFor(visit.status, invoiceIssued),
   };
 }
 
@@ -117,9 +145,10 @@ export interface TechnicianVisitDetail extends Omit<TechnicianVisitListItem, "de
 export function toTechnicianVisitDetail(
   visit: VisitDocument,
   request: RequestDetailSource | null,
-  customerName: string | null
+  customerName: string | null,
+  invoiceIssued: boolean
 ): TechnicianVisitDetail {
-  const base = toTechnicianVisitListItem(visit, request, customerName);
+  const base = toTechnicianVisitListItem(visit, request, customerName, invoiceIssued);
   const byId = new Map((request?.devices ?? []).map((device) => [device.clientDeviceId, device]));
 
   const devices = base.devices.flatMap((summary) => {

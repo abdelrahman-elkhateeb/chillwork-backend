@@ -23,16 +23,22 @@ apps/api/           the entire application (package.json, tsconfig, lockfile)
     db/              cached Mongoose connection
     middleware/      request id, 404, centralized error handler, require-db,
                       authenticate (server-side session validation), csrf-origin
-    lib/             HttpError, response envelope helpers
+    lib/             HttpError, response envelope, Idempotency-Key helpers
     modules/
       auth/          login/refresh/logout, Session model, JWT + refresh
                       token primitives, MongoDB-backed login throttling
       users/          User model, password hashing
-      companies/      Company model
+      companies/      Company model; admin company settings + labor fee (FS10)
+      catalog/        parts catalog, admin part management and stock
+                       ledger (FS11)
+      billing/        final invoice preview/issuance (FS25)
       ai/             Gemini device analysis service (analyzeDevices()) —
                        internal only, no HTTP route; see docs/api.md
       requests/       POST /requests — validated multi-device service
-                       request creation, idempotency, FS14 integration
+                       request creation, idempotency, FS14 integration;
+                       admin request list/detail (FS17)
+      staff/          admin technician management + link-based activation
+                       (FS09)
       visits/         admin visit scheduling + technician availability,
                        lock-based conflict prevention (FS18)
       technician/     technician-only read access to own assigned visits
@@ -40,8 +46,10 @@ apps/api/           the entire application (package.json, tsconfig, lockfile)
                       model (FS22); start/complete visit lifecycle and
                       per-device work results (REPAIRED/FAILED) with
                       optimistic concurrency, gated by FS22's approved
-                      scope where one exists (FS23)
+                      scope where one exists (FS23); per-device part
+                      selection (FS11); allowedActions
       health/         liveness check
+    scripts/          guarded demo seed/reset CLI (FS34)
   tests/             vitest + supertest + mongodb-memory-server
 docs/                API and architecture documentation
 ```
@@ -85,6 +93,8 @@ cp .env.example .env
 | `GEMINI_RATE_LIMIT_WINDOW_MS` | no | `60000` | Gemini throttle window, ms |
 | `REQUEST_CREATE_MAX_ATTEMPTS_PER_USER` | no | `20` | `POST /requests` throttle, per customer |
 | `REQUEST_CREATE_WINDOW_MS` | no | `3600000` | `POST /requests` throttle window, ms (1 hour) |
+| `DEMO_SEED_DATABASE` | seed only | — | must equal the connected database name for `pnpm seed:demo` |
+| `DEMO_SEED_PASSWORD` | seed only | — | password for every demo account, >= 12 chars |
 
 Startup fails fast with a clear error message if required variables are
 missing or invalid (see `src/config/env.ts`). See
@@ -121,6 +131,8 @@ Run from `apps/api/`:
   multi-document transaction `POST /requests` uses; no real database or
   `.env` needed)
 - `pnpm start` — run the compiled build (`dist/server.js`)
+- `pnpm seed:demo [--reset]` — seed (or wipe and re-seed) the synthetic demo
+  company; guarded, see [docs/demo.md](docs/demo.md)
 
 ## Notes
 
@@ -140,24 +152,24 @@ Run from `apps/api/`:
 - `POST /api/v1/requests` (FS15) — customer-only, idempotent, multi-device
   service request creation, calling FS14 before persisting — see
   [docs/api.md](docs/api.md) "Service requests (FS15)". Photo attachments
-  (`photoIds`) are rejected with `503 PHOTO_NOT_AVAILABLE`: FS13
-  (photo/upload) doesn't exist anywhere in this repository yet, and
-  accepting an unverified photo reference would be an ownership hole, not
-  a feature.
+  (FS12/FS13) were cancelled for the MVP; there is no `photoIds` field.
 - Admin visit scheduling (FS18) - see [docs/api.md](docs/api.md) "Visit
   scheduling (FS18)". FS09/FS17 do not exist in this repo, so it adds only
   what it needs (`Company.timezone`, visit models) and documents its assumptions.
 - Technician visit read access (FS19, `GET /technician/visits[/:id]`) - see
-  [docs/api.md](docs/api.md). Only the read half exists: photos/evidence wait on FS13,
-  which does not exist in this repo.
+  [docs/api.md](docs/api.md). Photos/evidence are out of scope (FS13 was cancelled
+  for the MVP).
 - On-site work agreement (FS22, `POST /technician/visits/:visitId/work-agreement/items`,
   `POST /technician/visits/:visitId/work-agreement/decisions`,
   `GET /technician/visits/:visitId/work-agreement`) - see [docs/api.md](docs/api.md)
   "On-site work agreement (FS22)". Technician-recorded on-site agreement, not an
   online customer approval page. Preserves Proposed Work != Approved Work: a
   client can never submit a decision directly, and a decided item can never be
-  re-decided (scope changes are always a new proposed item). No parts catalog
-  (FS11 doesn't exist) and no photos (FS13 owns those, not referenced here).
+  re-decided (scope changes are always a new proposed item). Uses its own
+  free-text/priced items, separate from FS11's parts catalog and FS23's
+  device-parts selection below — **not yet reconciled with the billing
+  pipeline, which bills off device-parts + WorkResult only; see "Current
+  limitations" in docs/api.md.**
 - Technician work execution (FS23, `POST /technician/visits/:id/start`,
   `POST /technician/visits/:id/complete`,
   `PUT /technician/visits/:visitId/work-results/:deviceId`,
@@ -169,8 +181,22 @@ Run from `apps/api/`:
   deliberate compatibility gap, documented in docs/api.md "Current
   limitations", not full enforcement. Visit completion still requires every
   device in `Visit.deviceIds` to have a result (unchanged by FS22). Payment,
-  invoicing, photo evidence, and reassignment endpoints remain out of scope for
-  FS23.
+  invoicing, and reassignment endpoints remain out of scope for FS23 itself.
+- Billing (FS10 company settings/labor fee, FS11 parts catalog with stock,
+  technician part selection via `device-parts`, FS25 invoices) — see
+  [docs/api.md](docs/api.md). FS11 deliberately tracks stock counts (a product
+  decision that departs from the ticket's availability flag); issuing an
+  invoice decrements stock. Billing is computed from `device-parts` +
+  `WorkResult` only — it does **not** consult FS22's `work-agreement` approval
+  state, so a part can currently be picked and billed without a recorded
+  customer decision on it. This is an open reconciliation between FS22 and
+  FS11/FS25, not by design; see docs/api.md "Current limitations". Payments
+  (FS26) and the customer invoice view (FS27) are not implemented.
+- Synthetic demo data (FS34, `pnpm seed:demo`) — see [docs/demo.md](docs/demo.md).
+- Technician accounts (FS09): admins create them and get a one-time activation
+  token to share (there is no email service yet, FS07); the technician sets their
+  own password via `POST /auth/activate-technician`. Admin request triage (FS17) is
+  read-only — see [docs/api.md](docs/api.md).
 - There is no lint tooling configured in this repository yet (no ESLint
   config/script exists) — setting one up is out of scope for FS02/FS04/FS14/FS15/FS18/FS22/FS23.
 - Logs never include secrets, tokens, cookies, or raw request bodies.

@@ -492,19 +492,23 @@ resolution, the uniqueness check, and password hashing, so an
 over-the-limit request is rejected as cheaply as possible. Exceeding any
 bucket returns `429 RATE_LIMITED`.
 
-### Error codes introduced by FS02 / FS04 / FS15 / FS18 / FS22 / FS23
+### Error codes introduced by FS02 / FS04 / FS09 / FS10 / FS11 / FS15 / FS18 / FS22 / FS23 / FS25
 
 `INVALID_CREDENTIALS`, `SESSION_EXPIRED`, `SESSION_REVOKED`,
 `INVALID_REFRESH_TOKEN`, `REFRESH_TOKEN_REUSED`, `RATE_LIMITED`,
 `CSRF_ORIGIN_REJECTED` (FS02), `CONFLICT`, `DEMO_COMPANY_UNAVAILABLE`
 (FS04), `MISSING_IDEMPOTENCY_KEY`, `INVALID_IDEMPOTENCY_KEY`,
-`IDEMPOTENCY_IN_PROGRESS`, `IDEMPOTENCY_CONFLICT`, `PHOTO_NOT_AVAILABLE`,
+`IDEMPOTENCY_IN_PROGRESS`, `IDEMPOTENCY_CONFLICT`,
 `REQUEST_CREATION_FAILED` (FS15), `SCHEDULE_CONFLICT`,
 `REQUEST_NOT_SCHEDULABLE`, `DEVICE_ALREADY_SCHEDULED` (FS18),
 `VISIT_STATUS_CONFLICT`, `VERSION_CONFLICT`, `WORK_RESULTS_INCOMPLETE`
-(FS23), `WORK_NOT_APPROVED` (FS22) — all follow the
-standard error envelope above. `VERSION_CONFLICT` and `VISIT_STATUS_CONFLICT`
-are shared verbatim between FS22 and FS23 rather than duplicated per feature.
+(FS23), `WORK_NOT_APPROVED` (FS22), `BILLING_NOT_CONFIGURED`,
+`CURRENCY_LOCKED` (FS10), `INSUFFICIENT_STOCK` (FS11),
+`INVOICE_ALREADY_ISSUED` (FS25), `TECHNICIAN_NOT_ACTIVATED`,
+`TECHNICIAN_ALREADY_ACTIVATED`, `INVALID_ACTIVATION_TOKEN` (FS09) — all
+follow the standard error envelope above. `VERSION_CONFLICT` and
+`VISIT_STATUS_CONFLICT` are shared verbatim across several features
+(FS18/FS22/FS23/FS11) rather than duplicated per feature.
 
 ### Assumptions (OPEN DECISIONs resolved with a default)
 
@@ -688,8 +692,7 @@ Content-Type: application/json
       "label": "Refrigerator",
       "brand": "Acme",
       "model": "X100",
-      "originalDescription": "Not cooling properly and making a buzzing noise.",
-      "photoIds": []
+      "originalDescription": "Not cooling properly and making a buzzing noise."
     }
   ]
 }
@@ -737,32 +740,23 @@ supplied, never a sequential/predictable counter).
 Errors: `VALIDATION_ERROR` (400), `MISSING_IDEMPOTENCY_KEY` /
 `INVALID_IDEMPOTENCY_KEY` (400 — header absent or outside
 `[A-Za-z0-9_-]{1,200}`), `FORBIDDEN` (403 — authenticated but not a
-`CUSTOMER`), `PHOTO_NOT_AVAILABLE` (503 — see "Photo attachments"
-below), `IDEMPOTENCY_IN_PROGRESS` / `IDEMPOTENCY_CONFLICT` (409 — see
+`CUSTOMER`), `IDEMPOTENCY_IN_PROGRESS` / `IDEMPOTENCY_CONFLICT` (409 — see
 "Idempotency"), `RATE_LIMITED` (429), `CSRF_ORIGIN_REJECTED` (403),
 `REQUEST_CREATION_FAILED` (500 — persistence failed after a successful
 Gemini call; safe to retry with the same Idempotency-Key).
 
-### Photo attachments — blocked pending FS13
+### Photo attachments — cancelled for the MVP
 
-FS13 (photo/upload) **does not exist anywhere in this repository** —
-no model, no ownership contract, nothing to verify a `photoId` against.
-Accepting one anyway would mean trusting a client-supplied identifier
-with no way to confirm it belongs to this customer/company — exactly
-the "attach another customer's photo by guessing an ID" hole this
-endpoint is required to prevent. So rather than invent a photo/ownership
-architecture or silently accept unverified IDs, **any device with a
-non-empty `photoIds` array is rejected with `503
-PHOTO_NOT_AVAILABLE`, and nothing is created.** `photoIds: []` (or
-omitted) works today. When FS13 ships, this becomes a real ownership
-check (`photo.companyId`/`photo.customerId` cross-checked against
-`req.auth`, the same pattern used everywhere else in this codebase) —
-not a redesign.
+Photo upload/storage (FS12/FS13) was cancelled for the MVP on 2026-09-27.
+There is no `photoIds` field: a client that still sends one has it stripped
+like any other unknown key, and nothing photo-related is stored. (Before the
+cancellation, a non-empty `photoIds` was rejected with `503
+PHOTO_NOT_AVAILABLE`; that error code no longer exists.)
 
 ### Gemini integration (FS14)
 
 `analyzeDevices()` is called exactly once per new submission (never on
-an idempotent replay — see below), after the photo check and the
+an idempotent replay — see below), after the
 idempotency reservation, before the database transaction. The mapping
 is `clientDeviceId`/`originalDescription` straight through, with
 `label`/`brand`/`model` combined into FS14's `equipment` input. A
@@ -786,7 +780,7 @@ a duplicate.
 - **Same key, same payload** → `200` with the original request, no
   second Gemini call, no second document created. "Same payload" is
   checked via a SHA-256 fingerprint of a canonicalized request shape
-  (devices sorted by `clientDeviceId`, each device's `photoIds` sorted)
+  (devices sorted by `clientDeviceId`)
   — the fingerprint is stored, the raw request content never is.
 - **Same key, different payload** → `409 IDEMPOTENCY_CONFLICT`. Nothing
   is created.
@@ -825,6 +819,143 @@ the one shared provider quota from being exhausted by anyone; this one
 stops a single customer from being the one who exhausts it. Checked
 before the idempotency reservation, so a throttled call never reserves
 a key or reaches Gemini.
+
+## Customer requests, detail and timeline (FS16)
+
+Customer-only (`ADMIN`/`TECHNICIAN` get `403`) and read-only. Every lookup is scoped to
+`companyId` **and** `customerId = req.auth.userId`; another customer's request, a
+missing id and a malformed id are all the same `404` ("Request not found").
+
+**Never returned to customers:** AI analysis, the technician's free-text
+`failureNote`, staff/actor ids, part-selection edits, and any price before an invoice
+exists.
+
+### Progress
+
+Each device gets a `progress` from its latest visit that is not `CANCELLED`:
+
+| `progress` | Meaning |
+| ---------- | ------- |
+| `AWAITING_SCHEDULE` | no visit covers the device (or its only visit was cancelled) |
+| `SCHEDULED` / `IN_PROGRESS` | the covering visit's status |
+| `REPAIRED` / `NOT_REPAIRED` | the covering visit is `COMPLETED`; `NOT_REPAIRED` carries the structured `failureReason` |
+
+A result only shows once its visit is `COMPLETED`; while the technician is working,
+the device is `IN_PROGRESS` even if a result was already recorded.
+
+The request's `progress` is `COMPLETED` only when **every** device is `REPAIRED` or
+`NOT_REPAIRED`, and only then is `outcome` set: `FULLY_REPAIRED` requires every device
+repaired, so a request with one failed device is `PARTIALLY_REPAIRED` (or
+`NO_REPAIR`), never "all resolved". Otherwise `progress` is `IN_PROGRESS` (any device
+in progress), `SCHEDULED` (any device scheduled or done) or `SUBMITTED`, with
+`outcome: null`.
+
+### `GET /api/v1/requests?status=&page=&pageSize=`
+
+The caller's requests, newest first (stable paging; default 20, max 100; unknown
+filters such as `customerId` are `400`).
+
+```json
+{ "data": [{ "requestId": "...", "reference": "SR-7K9XQAB2", "status": "SUBMITTED",
+  "progress": "SCHEDULED", "outcome": null, "createdAt": "...", "address": "...", "deviceCount": 2,
+  "devices": [{ "clientDeviceId": "a", "label": "Living room AC", "progress": "SCHEDULED" },
+              { "clientDeviceId": "b", "label": "Bedroom AC", "progress": "AWAITING_SCHEDULE" }] }],
+  "meta": { "page": 1, "pageSize": 20, "total": 1 } }
+```
+
+### `GET /api/v1/requests/:id`
+
+```json
+{ "data": { "requestId": "...", "reference": "SR-7K9XQAB2", "status": "SUBMITTED",
+  "progress": "COMPLETED", "outcome": "PARTIALLY_REPAIRED", "createdAt": "...",
+  "address": "...", "contactPhone": "+201000000004",
+  "devices": [{ "clientDeviceId": "a", "label": "Living room AC", "brand": null, "model": null,
+    "originalDescription": "...", "progress": "NOT_REPAIRED", "failureReason": "PART_UNAVAILABLE", "visitId": "..." }],
+  "visits": [{ "visitId": "...", "startAt": "...", "endAt": "...", "timezone": "Africa/Cairo",
+    "status": "COMPLETED", "technicianName": "Omar Technician", "deviceIds": ["a"],
+    "invoice": { "id": "...", "reference": "INV-...", "currency": "EGP", "totalMinor": 68000,
+      "status": "ISSUED", "paymentState": "UNPAID", "issuedAt": "..." } }] } }
+```
+
+Cancelled visits are left out. Times are UTC ISO strings with the visit's IANA
+`timezone` for display. `invoice` is a summary/link; the itemized customer invoice
+view is FS27. There is no service report yet (FS24).
+
+### `GET /api/v1/requests/:id/timeline`
+
+Customer-visible history, oldest first, built from the audited `VisitEvent` log plus
+the request's own creation:
+
+```json
+{ "data": [
+  { "type": "REQUEST_SUBMITTED", "occurredAt": "...", "visitId": null },
+  { "type": "VISIT_SCHEDULED", "occurredAt": "...", "visitId": "..." },
+  { "type": "VISIT_STARTED", "occurredAt": "...", "visitId": "..." },
+  { "type": "VISIT_COMPLETED", "occurredAt": "...", "visitId": "..." },
+  { "type": "INVOICE_ISSUED", "occurredAt": "...", "visitId": "..." } ] }
+```
+
+Only those five types appear. Assignment, work-result and part-selection events are
+internal, and no event carries an actor, a note or a result. Events of `CANCELLED`
+visits are left out, matching the detail endpoint (there is no cancellation event
+to show until FS20).
+
+## Admin request triage (FS17)
+
+Admin-only and read-only (`CUSTOMER`/`TECHNICIAN` get `403`). Everything is scoped to
+`req.auth.companyId`.
+
+### `GET /api/v1/admin/requests?search=&status=&page=&pageSize=`
+
+The company's requests, newest first (`createdAt`, then id — stable paging). Default
+20, max 100; unknown filters are `400`.
+
+- `search` (1–100 chars, literal text, never a regex) matches a **reference prefix**
+  (case-insensitive: `sr-k9x` finds `SR-K9XQAB27`) or a customer **of this company**
+  whose name, email or phone contains it.
+- `status` is a request status (only `SUBMITTED` exists today).
+
+```json
+{ "data": [{ "requestId": "...", "reference": "SR-7K9XQAB2", "status": "SUBMITTED",
+  "createdAt": "...", "address": "12 Nile Street, Cairo",
+  "customer": { "id": "...", "name": "Mona Customer", "phone": "+201000000004" },
+  "deviceCount": 2, "unscheduledDeviceCount": 1, "visitCount": 1, "nextActions": ["SCHEDULE_VISIT"] }],
+  "meta": { "page": 1, "pageSize": 20, "total": 1 } }
+```
+
+`customer.phone` is the contact number given on the request. A device is
+"unscheduled" until a visit that is not `CANCELLED` covers it.
+
+### `GET /api/v1/admin/requests/:id`
+
+```json
+{ "data": { "requestId": "...", "reference": "SR-7K9XQAB2", "status": "SUBMITTED", "createdAt": "...",
+  "address": "...", "contactPhone": "+201000000004",
+  "customer": { "id": "...", "name": "Mona Customer", "email": "mona@example.com", "phone": "+201000000004" },
+  "devices": [{ "clientDeviceId": "living-room", "label": "Living room AC", "brand": null, "model": null,
+    "originalDescription": "exactly what the customer typed",
+    "aiAnalysis": { "status": "SUCCESS", "errorCode": null,
+      "analysis": { "summary": "...", "possibleCauses": [], "missingInformation": [], "inspectionQuestions": [] } },
+    "visitId": "..." }],
+  "visits": [{ "visitId": "...", "technician": { "id": "...", "name": "Omar Technician" },
+    "startAt": "...", "endAt": "...", "timezone": "Africa/Cairo", "status": "COMPLETED",
+    "deviceIds": ["living-room"], "workTypes": ["INSPECTION", "REPAIR"], "outcome": "FULLY_REPAIRED",
+    "invoice": { "id": "...", "reference": "INV-...", "currency": "EGP", "totalMinor": 68000,
+      "status": "ISSUED", "paymentState": "UNPAID" } }],
+  "unscheduledDeviceCount": 0, "nextActions": [] } }
+```
+
+- The customer's `originalDescription` and the AI output are separate fields. When the
+  analysis failed, `aiAnalysis.analysis` is `null` (never invented) and
+  `status`/`errorCode` say why — the admin can still triage from the original text.
+  Model and prompt version are never returned.
+- `devices[].visitId` is the latest non-cancelled visit covering the device, or `null`.
+- `visits[].outcome` is FS23's aggregate (`null` until every device on the visit has a
+  result); `invoice` is the FS25 invoice summary or `null`.
+- `nextActions` is `["SCHEDULE_VISIT"]` while the request is schedulable and a device
+  is uncovered. There are no other admin lifecycle actions yet (cancel, reschedule and
+  reassign are FS20), so no status transition can be forced through this API.
+- Another company's request, a missing id and a malformed id are all the same `404`.
 
 ## Visit scheduling (FS18)
 
@@ -919,7 +1050,7 @@ The visit and its two events (`VISIT_SCHEDULED`, `TECHNICIAN_ASSIGNED`, recorded
   needs to set the status (the conflict check is status-based).
 - No business-hours, past-date, or lookahead rules were specified, so none are enforced.
 
-## Technician visit access (FS19 - read half)
+## Technician visit access (FS19)
 
 Technician-only (`TECHNICIAN` role; `CUSTOMER`/`ADMIN` get `403 FORBIDDEN`). Both
 endpoints are read-only `GET`s. The technician is always `req.auth.userId` within
@@ -927,11 +1058,10 @@ endpoints are read-only `GET`s. The technician is always `req.auth.userId` withi
 `companyId` query parameter is rejected with `VALIDATION_ERROR` (unrecognized
 filters are never silently ignored - see Pagination).
 
-> **Scope note:** this is only the read half of FS19. Photo/evidence access, technician
-> actions (edit/upload/collect/complete) and reassignment are not implemented.
-> FS13 (photo storage and ownership) does not exist in this repository, so no photo
-> endpoint, field or authorization exists; assignment-scoped photo access is deferred
-> until FS13 provides a real model.
+> **Scope note:** photo/evidence access is out of scope — photos (FS13) were cancelled
+> for the MVP. Technician actions live in FS23, part selection and FS25; the visit
+> list/detail advertise them through `allowedActions` (below). Admin reassignment is
+> FS20 and not implemented.
 
 ### `GET /api/v1/technician/visits`
 
@@ -952,7 +1082,7 @@ ordered by `startAt` then id, so paging is deterministic.
     "customer": { "name": "Jane Customer", "phone": "+15550001111" },
     "address": "123 Main St",
     "devices": [{ "clientDeviceId": "d1", "label": "Refrigerator", "brand": "Acme", "model": "X1" }],
-    "allowedActions": []
+    "allowedActions": ["START_VISIT"]
   }],
   "meta": { "page": 1, "pageSize": 20, "total": 1 }
 }
@@ -974,6 +1104,21 @@ on the request):
 `analysisStatus` is only `SUCCESS`, `FAILED` or `UNAVAILABLE`. The analysis is AI-generated
 assistance derived from customer text - treat it as advisory, not a diagnosis.
 `customer.phone` is the contact number the customer gave for this request.
+
+### `allowedActions`
+
+Derived only from the visit's status and whether its invoice exists:
+
+| Visit status | `allowedActions` |
+| ------------ | ---------------- |
+| `SCHEDULED` | `START_VISIT` |
+| `IN_PROGRESS` | `SELECT_PARTS`, `RECORD_WORK_RESULT`, `COMPLETE_VISIT` |
+| `COMPLETED` | `SELECT_PARTS`, `ISSUE_INVOICE` until the invoice exists, then none |
+| `CANCELLED` | none |
+
+It is a UI hint, not an authorization decision: every action endpoint still re-checks
+assignment and status itself (e.g. `COMPLETE_VISIT` can still answer
+`409 WORK_RESULTS_INCOMPLETE`).
 
 ### Authorization
 
@@ -1000,7 +1145,8 @@ document (or take a `visit:<id>` `ScheduleLock`) first, like FS18's lock-first p
 Customer email, `customerId`, `companyId`, `technicianId`, `scheduledById`, the request's
 internal id, other technicians' assignments, other requests or devices, AI provider
 metadata (model, prompt version, timestamps, error codes), lock or idempotency data, and
-any financial data (none exists yet).
+any financial data (prices and totals are only returned by the part-selection and
+invoice endpoints).
 
 ### Index
 
@@ -1197,6 +1343,18 @@ agreement, in `work-result.service.ts`'s `assertDeviceWithinApprovedScope`:
 
 ### Current limitations
 
+* **FS22 is not consulted by billing.** FS11 (parts catalog) and FS25
+  (invoicing) were built in parallel against `technician/device-parts.*`, a
+  separate per-device part-selection model with **no decision/approval field
+  at all** — `billing/invoice.service.ts` bills any `REPAIRED` device's
+  `device-parts` selection regardless of whether an `APPROVED` `WorkAgreement`
+  item exists for it. In practice this means a part can currently be picked
+  and billed without ever going through FS22's proposed -> approved workflow.
+  This is an open reconciliation between FS22 and FS11/FS25 (not a design
+  decision), most likely resolved by adding an approval gate to
+  `device-parts` itself rather than running both item models side by side —
+  see the module-level comment on `work-agreement.service.ts` for the same
+  note in code.
 * **The fallback above is a real, deliberate gap, not an oversight.** FS23 was
   implemented and shipped before FS22 existed, with 43 passing tests that never
   create a `WorkAgreement`. Making the FS22 gate unconditional would break every
@@ -1213,9 +1371,11 @@ agreement, in `work-result.service.ts`'s `assertDeviceWithinApprovedScope`:
   diverging from the already-tested FS23 completion behavior. Flagged as a
   remaining decision for whenever FS21 exists and visits are guaranteed to go
   through inspection first.
-* No photos (`FS13` owns photo evidence; none is referenced here), no parts
-  catalog/stock validation (`FS11` does not exist — `partIdentifier` is a free
-  string), no invoice/payment logic (`FS25`/`FS26` are not implemented here).
+* No photos (FS13 was cancelled for the MVP; none is referenced here). FS22's
+  own items are free-text/technician-priced (`partIdentifier` is a free
+  string) — they do not use FS11's parts catalog, unlike `device-parts` (see
+  above). No invoice/payment logic is implemented in FS22 itself (FS25/FS26
+  own that).
 
 ## Technician work execution (FS23)
 
@@ -1230,9 +1390,18 @@ cached/earlier fetch). All mutating routes below are also behind the
 > exactly what is and is not enforced. `Visit.deviceIds` (the set an admin
 > already assigned to the visit) remains the boundary for **completing** a visit
 > and for any device FS22 has not been used on yet; it is no longer the only
-> word on whether a specific `REPAIRED`/`FAILED` write is allowed. FS23 still
-> does not compute anything billable — that remains downstream (FS25), and no
-> photo/evidence handling is included (FS13 still doesn't exist).
+> word on whether a specific `REPAIRED`/`FAILED` write is allowed. No
+> photo/evidence handling is included (FS13 was cancelled for the MVP).
+>
+> **FS23 itself still computes nothing billable — pricing/invoicing is FS25's
+> job, and FS25 currently reads `device-parts` (FS11's per-device part
+> selection, see "Technician part selection" below) + `WorkResult`, not FS22's
+> `WorkAgreement`.** That means a part picked via `device-parts` and billed on
+> a `REPAIRED` device is *not* currently required to have gone through FS22's
+> proposed → approved workflow at all — the two features were built in
+> parallel against the same problem (what work is the customer actually paying
+> for) and have not been reconciled. See "On-site work agreement (FS22)" >
+> "Current limitations" above.
 
 ### Visit lifecycle transitions
 
@@ -1337,7 +1506,315 @@ work-result write.
 ### Never returned to technicians (in addition to FS19's list)
 
 `recordedById`, `visitId`/`requestId`/`companyId` of anything other than the
-resource named in the URL, and any cost/price/billable field (none exists).
+resource named in the URL, and any cost/price/billable field (work results carry none;
+prices live in part selections and invoices).
+
+## Company settings and labor fee (FS10)
+
+Admin-only (`ADMIN` role; `CUSTOMER`/`TECHNICIAN` get `403 FORBIDDEN`). The company
+is always `req.auth.companyId`; a `companyId` in the body is stripped.
+
+### `GET /api/v1/admin/company-settings`
+
+```json
+{ "data": { "name": "Cool Air", "contact": { "phone": "+201000000000", "email": "ops@coolair.example" },
+  "timezone": "Africa/Cairo", "currency": "EGP", "laborFeeMinor": 15000 } }
+```
+
+A new company starts with `currency: null` and `laborFeeMinor: null`. Until both are
+set, every pricing flow (catalog, part selection, invoicing) answers
+`409 BILLING_NOT_CONFIGURED` instead of guessing a currency or a fee.
+
+### `PATCH /api/v1/admin/company-settings`
+
+Any subset of `name`, `contact: { phone?, email? }`, `timezone` (IANA), `currency`,
+`laborFeeMinor`; at least one field is required. `null` clears a contact field.
+Behind the CSRF/origin guard. Returns the full settings object.
+
+- `currency` is one of `EGP`, `SAR`, `AED`, `USD`, `EUR`. **It is locked once set**
+  (`409 CURRENCY_LOCKED`): catalog prices and every stored snapshot are amounts of
+  that currency's minor unit, so switching it would silently reinterpret them.
+- `laborFeeMinor` is a non-negative integer (max `1_000_000_000`). It is charged
+  once per `REPAIRED` device and never for a `FAILED` one (no-fix-no-fee).
+- Changing `timezone` affects visits booked afterwards only; each visit keeps the
+  zone it was booked in (FS18).
+
+### Money and rounding
+
+All money is an integer count of the company currency's minor unit (every supported
+currency has 2 decimals, so `15000` = 150.00). Totals are only ever sums and integer
+multiples of stored amounts, so no rounding step exists anywhere.
+
+### Audit
+
+Every change to `currency` or `laborFeeMinor` writes a `CompanySettingsAudit` entry
+(`field`, `previousValue`, `newValue`, acting admin, time) in the same transaction as
+the change. No endpoint reads the audit yet.
+
+## Parts catalog and stock (FS11)
+
+> **Deviation from the FS11 ticket (product decision, 2026-09-27):** the ticket asked
+> for a plain availability flag with no stock counts. The product owner chose real
+> stock counts instead: each part has a `stockQuantity`, admins adjust it, and issuing
+> an invoice (FS25) decrements it for the parts fitted on repaired devices. `inStock`
+> is derived (`stockQuantity > 0`), never stored.
+
+Every endpoint below needs the company's billing settings (FS10) — without a currency
+and labor fee they answer `409 BILLING_NOT_CONFIGURED`.
+
+### Part DTO
+
+```json
+{ "id": "...", "name": "Fan Motor", "description": null, "unitPriceMinor": 45000,
+  "currency": "EGP", "inStock": true, "isActive": true }
+```
+
+Admin responses add `stockQuantity`. `currency` is the company's (locked, see FS10).
+
+### `GET /api/v1/catalog/parts?q=&available=&page=&pageSize=`
+
+Any authenticated role (customers see prices up front, technicians pick from it).
+Active parts of the caller's company only; out-of-stock parts stay listed with
+`inStock: false`. `q` is a case-insensitive literal substring of the name (never a
+regex); `available` is `true`/`false`. Paginated per the conventions above (default
+20, max 100), sorted by name. The stock count is never returned here.
+
+### `GET /api/v1/catalog/pricing`
+
+Any authenticated role: `{ "currency": "EGP", "laborFeeMinor": 15000 }` — the labor
+fee a repaired device costs on top of its parts.
+
+### Admin: `GET /api/v1/admin/parts?q=&available=&isActive=&page=&pageSize=`
+
+All parts including inactive ones, with `stockQuantity`.
+
+### Admin: `POST /api/v1/admin/parts`
+
+`{ name, description?, unitPriceMinor, stockQuantity?, isActive? }` -> `201`. Names are
+unique per company ignoring case and repeated spaces (`409 CONFLICT`). `stockQuantity`
+(default 0) is only settable here; an initial stock is written to the stock ledger.
+
+### Admin: `PATCH /api/v1/admin/parts/:id`
+
+Any of `name`, `description`, `unitPriceMinor`, `isActive`. **Stock is not editable
+here** (a `stockQuantity` field is stripped) so an edit can never overwrite a
+decrement an invoice made a moment earlier. A price change only affects future part
+selections — existing selections and issued invoices keep their snapshots. Parts are
+never deleted; `isActive: false` hides a part from the catalog and from new
+selections. Another company's part is `404`.
+
+### Admin: `POST /api/v1/admin/parts/:id/stock-adjustments`
+
+`{ delta, note? }` — a non-zero integer added to `stockQuantity`. A decrement is
+applied with a single guarded update (`stockQuantity >= -delta`), so concurrent
+adjustments and invoices can never drive stock below zero; one that would is
+`409 INSUFFICIENT_STOCK` and changes nothing. Returns the updated admin Part DTO.
+
+### Stock ledger
+
+Every stock change (initial stock, admin adjustment, invoice issuance) writes a
+`PartStockMovement` (`delta`, `quantityAfter`, `reason`, actor, time, and the invoice
+for issuance) in the same transaction as the change.
+
+## Technician part selection
+
+The technician picks, per device, the catalog parts they are fitting — this is the
+price the customer sees and agrees to on site, and what FS25 bills for a repaired
+device. It is a deliberately small stand-in for FS22's agreement workflow (no
+preview/agreement revisions): the product owner chose "technician picks parts from
+the catalog, invoice = parts + labor fee".
+
+Same authorization chain as FS23 (`TECHNICIAN` role, current assignment via
+`findAssignedVisit`, device must be in `Visit.deviceIds` and on the request —
+otherwise the uniform `404`), and the same serialization point: every write
+re-checks company + technician + status on the Visit document inside its
+transaction. Requires billing settings (`409 BILLING_NOT_CONFIGURED`).
+
+### `PUT /api/v1/technician/visits/:visitId/devices/:deviceId/parts`
+
+```json
+{ "items": [{ "partId": "...", "quantity": 1 }, { "partId": "...", "quantity": 2 }], "version": 0 }
+```
+
+Replaces the device's whole list (`items: []` clears it; max 20 items, quantity
+1–100, each part once). Only ids and quantities are accepted — prices always come
+from the catalog; a client-supplied price/total is stripped.
+
+- A part **newly added** to the device must be active in the caller's company
+  (otherwise `400 VALIDATION_ERROR`, `fieldErrors["items.N.partId"]`) and is
+  snapshotted at the current catalog price. A part **already on** the device keeps
+  the name/price snapshotted when it was first added — the agreed price — even if
+  the catalog price changed or the part was deactivated since.
+- **Availability:** every item must fit in `stockQuantity` minus the units already
+  picked for *other* devices (on this visit or any other) that are still pending: the
+  visit is not `CANCELLED`, its invoice has not been issued, and that device has not
+  been recorded `FAILED`. Otherwise `409 INSUFFICIENT_STOCK` with
+  `fieldErrors["items.N.quantity"] = ["Only N available"]` and nothing is saved. So two
+  picks can never both claim the last unit and leave a completed visit with an invoice
+  that can never be issued. The device's own previous list does not count against it.
+  Picks for the same part are serialized (a `part:<id>` lock, same pattern as FS18),
+  so concurrent picks can't both pass. Stock itself is only decremented when the
+  invoice is issued.
+- `version` has the same compare-and-set semantics as work results (0 = nothing
+  selected yet; `409 VERSION_CONFLICT` on mismatch).
+- Allowed while the visit is `IN_PROGRESS`, and still after it is `COMPLETED` until the
+  invoice is issued, so the technician can correct the list before invoicing
+  (`409 VISIT_STATUS_CONFLICT` for other statuses, `409 INVOICE_ALREADY_ISSUED` once
+  invoiced). Writes a `DEVICE_PARTS_UPDATED` VisitEvent.
+
+Response:
+
+```json
+{ "data": { "clientDeviceId": "d1", "partsMinor": 61000, "version": 1,
+  "items": [{ "partId": "...", "name": "Fan Motor", "unitPriceMinor": 45000, "quantity": 1, "lineTotalMinor": 45000 },
+            { "partId": "...", "name": "Capacitor", "unitPriceMinor": 8000, "quantity": 2, "lineTotalMinor": 16000 }] } }
+```
+
+### `GET /api/v1/technician/visits/:visitId/parts`
+
+`{ visitId, currency, devices: [<the object above>] }` — one entry per device in
+`Visit.deviceIds`, including devices with nothing picked (`items: []`, `version: 0`).
+Readable in any visit status.
+
+## Final invoice (FS25)
+
+Technician-only, same authorization chain as FS23 (a visit assigned to someone else is
+the uniform `404`). Requires billing settings (`409 BILLING_NOT_CONFIGURED`).
+
+> **Dependency note:** FS24 (service report) and FS22 (agreement workflow) do not
+> exist. The invoice is priced from what does exist: FS23 work results, the
+> technician's part selections (above), and the FS10 labor fee.
+
+### Pricing rule (no-fix-no-fee)
+
+- A `REPAIRED` device costs its picked parts (at their snapshotted prices) plus one
+  `laborFeeMinor`.
+- A `FAILED` device costs **zero** and lists no parts, even if parts were picked or
+  work was attempted; its `result`/`failureReason` stay on the invoice.
+- `subtotalMinor` = sum of parts on billable devices, `laborMinor` = fee × repaired
+  devices, `totalMinor` = both. Integer minor units only; nothing is rounded.
+
+### Invoice DTO
+
+```json
+{ "data": { "id": "...", "reference": "INV-7K9XQAB2", "visitId": "...",
+  "currency": "EGP", "laborFeeMinor": 15000,
+  "devices": [
+    { "clientDeviceId": "d1", "label": "Living room AC", "result": "REPAIRED", "failureReason": null,
+      "billable": true, "parts": [{ "partId": "...", "name": "Fan Motor", "unitPriceMinor": 45000,
+      "quantity": 1, "lineTotalMinor": 45000 }], "partsMinor": 45000, "laborMinor": 15000, "totalMinor": 60000 },
+    { "clientDeviceId": "d2", "label": "Bedroom AC", "result": "FAILED", "failureReason": "PART_UNAVAILABLE",
+      "billable": false, "parts": [], "partsMinor": 0, "laborMinor": 0, "totalMinor": 0 }],
+  "subtotalMinor": 45000, "laborMinor": 15000, "totalMinor": 60000,
+  "status": "ISSUED", "paymentState": "UNPAID", "issuedAt": "2026-09-27T12:00:00.000Z" } }
+```
+
+`status`/`paymentState` are `ISSUED`/`UNPAID`, or `CLOSED`/`NOT_REQUIRED` when the
+total is zero (every device failed) — a closed zero-charge record with no payment
+transaction of any kind. Recording payments is FS26.
+
+### `GET /api/v1/technician/visits/:id/invoice-preview`
+
+The same calculation from current data, without issuing anything or touching stock
+(no `id`/`reference`/`status`/`paymentState`/`issuedAt`). Allowed while the visit is
+`IN_PROGRESS` (to show the customer before finishing) or `COMPLETED`; otherwise
+`409 VISIT_STATUS_CONFLICT`. A device with no result yet has `result: null` and
+contributes zero.
+
+### `POST /api/v1/technician/visits/:id/invoice`
+
+Requires an `Idempotency-Key` header (same format as FS15) and a `COMPLETED` visit
+(`409 VISIT_STATUS_CONFLICT`). Behind the CSRF/origin guard. `201` with the invoice.
+
+One transaction does everything or nothing: re-check assignment + `COMPLETED` on the
+Visit document, price the invoice, take stock, write the invoice, the stock ledger
+(`INVOICE_ISSUED`) and an `INVOICE_ISSUED` VisitEvent.
+
+- **Stock:** for every part on a repaired device, one guarded decrement
+  (`stockQuantity >= quantity`). If any part is short (stock changed since it was
+  picked), `409 INSUFFICIENT_STOCK` with `fieldErrors["parts.<partId>"]` — no invoice,
+  no stock taken. Parts picked for failed devices are not taken.
+- **Exactly one invoice per visit** (unique index). A retry with the same
+  `Idempotency-Key` returns the existing invoice with `200`; any other key gets
+  `409 INVOICE_ALREADY_ISSUED`. Concurrent issuances serialize on the Visit document,
+  so only one ever commits.
+- **Immutable:** names, unit prices, the labor fee and all totals are copied into the
+  invoice, so later catalog or settings changes never alter it.
+
+### `GET /api/v1/technician/visits/:id/invoice`
+
+The issued invoice, or `404` if none has been issued yet. A customer-facing invoice
+view is FS27 and not implemented.
+
+## Technician management and activation (FS09)
+
+Admin-only except activation. Technicians are always created as `TECHNICIAN` in the
+admin's own company; `role`/`companyId`/`isActive` in a body are stripped.
+
+> **No email yet (FS07):** instead of an emailed invitation, creating a technician
+> returns a one-time `activationToken` that the admin passes on (e.g. as a link to the
+> frontend's activation page, `…/activate-technician?token=<token>`). The token is 256
+> random bits, only its SHA-256 hash is stored, it expires after 7 days, and it works
+> once. No password is ever chosen by, shown to, or sent through the admin.
+
+### Technician DTO
+
+```json
+{ "id": "...", "name": "Omar Technician", "email": "omar@example.com", "phone": "+201000000002",
+  "status": "ACTIVE", "activeVisitCount": 2, "createdAt": "2026-09-28T09:00:00.000Z" }
+```
+
+`status` is `INVITED` (created, not activated — cannot log in or be scheduled),
+`ACTIVE`, or `INACTIVE` (deactivated). `activeVisitCount` is the technician's
+`SCHEDULED`/`IN_PROGRESS` visits — after a deactivation, what still needs reassigning
+(FS20).
+
+### `GET /api/v1/admin/technicians?status=&search=&page=&pageSize=`
+
+The company's technicians sorted by name. `search` is a case-insensitive literal
+substring of name or email. Paginated (default 20, max 100); unknown filters are
+`400`. This is the list the admin picks from when scheduling (FS18).
+
+### `POST /api/v1/admin/technicians`
+
+`{ name, email, phone }` -> `201 { technician, invitation: { activationToken, expiresAt } }`.
+An email that already has an account (any role, any company) is `409 CONFLICT`.
+
+### `POST /api/v1/admin/technicians/:id/invitation`
+
+A fresh `{ activationToken, expiresAt }` for an `INVITED` technician (the previous
+unused token stops working). `409 TECHNICIAN_ALREADY_ACTIVATED` once they have
+activated.
+
+### `PATCH /api/v1/admin/technicians/:id`
+
+Any of `name`, `phone`, `isActive` (the email is the login and is not editable).
+Returns the technician DTO.
+
+- `isActive: false` revokes **all** of the technician's sessions at once (their next
+  request is `401` even with an unexpired JWT), revokes a pending invitation, and
+  blocks login and new scheduling. Visits are not touched: past and current
+  assignments keep their attribution.
+- `isActive: true` reactivates a deactivated technician. An `INVITED` technician
+  cannot be switched on (`409 TECHNICIAN_NOT_ACTIVATED`) — they have no password of
+  their own yet.
+- A customer, an admin or another company's user is `404`.
+
+### `POST /api/v1/auth/activate-technician`
+
+Public, behind the CSRF/origin guard and a per-IP throttle (10 per 15 minutes).
+`{ token, password }` (password: 8+ characters) -> `200 { "data": { "email": "..." } }`.
+Consumes the token and sets the technician's own password in one transaction; the
+technician then signs in with `POST /auth/login` (activation does not log in).
+Unknown, expired, used or superseded tokens all get the same
+`400 INVALID_ACTIVATION_TOKEN`.
+
+## Demo data (FS34)
+
+`pnpm seed:demo [--reset]` seeds a synthetic demo company, accounts, catalog,
+requests, visits and invoices, plus a test-only second tenant. It is a guarded CLI
+script with no HTTP endpoint. See [demo.md](demo.md) for the guards, the seeded
+data and a walkthrough.
 
 ## Endpoints
 

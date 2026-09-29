@@ -37,28 +37,11 @@ export async function checkRequestCreationThrottle(userId: Types.ObjectId, now: 
 }
 
 /**
- * FS13 (photo/upload) does not exist anywhere in this repository — no
- * model, no ownership contract, nothing to verify against. Accepting a
- * client-supplied photoId with no way to verify it belongs to this
- * customer/company would be exactly the "attach another customer's
- * photo by guessing an ID" hole FS15 is required to prevent, so the only
- * safe behavior until FS13 ships is to refuse the request outright
- * rather than silently accept unverified references. See docs/api.md
- * "Photo attachments" for the tracked blocker.
- */
-function assertNoPhotosRequested(devices: readonly DeviceInput[]): void {
-  const anyPhotos = devices.some((device) => device.photoIds.length > 0);
-  if (anyPhotos) {
-    throw HttpError.photoNotAvailable();
-  }
-}
-
-/**
  * A cryptographic hash of a canonicalized request shape, used only for
  * equality-checking a retried Idempotency-Key against the payload it was
  * first used with — never exposed to the client, never reversible to
- * the original content. Devices (and each device's photoIds) are sorted
- * before hashing so re-serializing the same logical payload in a
+ * the original content. Devices are sorted by clientDeviceId before
+ * hashing so re-serializing the same logical payload in a
  * different array order still fingerprints identically.
  */
 function computeFingerprint(input: CreateRequestInput): string {
@@ -69,7 +52,6 @@ function computeFingerprint(input: CreateRequestInput): string {
       brand: device.brand ?? null,
       model: device.model ?? null,
       originalDescription: device.originalDescription,
-      photoIds: [...device.photoIds].sort(),
     }))
     .sort((a, b) => a.clientDeviceId.localeCompare(b.clientDeviceId));
 
@@ -182,7 +164,7 @@ interface RequestLogEvent {
   durationMs?: number;
 }
 
-/** Safe operational metadata only — never address/phone/description/photoIds. */
+/** Safe operational metadata only — never address/phone/description. */
 function logRequestCreationEvent(event: RequestLogEvent): void {
   const log = event.outcome === "failed" ? console.warn : console.info;
   log({ event: "requests.create", ...event });
@@ -195,7 +177,7 @@ export interface CreateServiceRequestOutcome {
 
 /**
  * FS15's core flow:
- *   photo blocker check -> idempotency reserve/lookup -> FS14
+ *   idempotency reserve/lookup -> FS14
  *   analyzeDevices() (skipped entirely on an idempotent hit) -> a single
  *   short transaction creating the request and completing the
  *   reservation together.
@@ -211,8 +193,6 @@ export async function createServiceRequest(
   input: CreateRequestInput,
   idempotencyKey: string
 ): Promise<CreateServiceRequestOutcome> {
-  assertNoPhotosRequested(input.devices);
-
   const now = new Date();
   const fingerprint = computeFingerprint(input);
   const reservationOutcome = await reserveIdempotency(auth, idempotencyKey, fingerprint, now);
@@ -275,7 +255,6 @@ export async function createServiceRequest(
           brand: device.brand ?? null,
           model: device.model ?? null,
           originalDescription: device.originalDescription,
-          photoIds: [] as string[],
           analysis: deviceAnalysis?.analysis ?? null,
           analysisMetadata: deviceAnalysis?.metadata
             ? {

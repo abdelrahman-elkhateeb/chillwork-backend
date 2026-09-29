@@ -90,10 +90,6 @@ export class HttpError extends Error {
     return new HttpError(409, "IDEMPOTENCY_CONFLICT", message);
   }
 
-  static photoNotAvailable(message = "Photo attachments are not available yet"): HttpError {
-    return new HttpError(503, "PHOTO_NOT_AVAILABLE", message);
-  }
-
   static requestCreationFailed(message = "Unable to create the request, please try again"): HttpError {
     return new HttpError(500, "REQUEST_CREATION_FAILED", message);
   }
@@ -128,5 +124,33 @@ export class HttpError extends Error {
 
   static workNotApproved(message = "This device has no approved work yet"): HttpError {
     return new HttpError(409, "WORK_NOT_APPROVED", message);
+  }
+
+  static billingNotConfigured(message = "Billing settings (currency and labor fee) are not configured"): HttpError {
+    return new HttpError(409, "BILLING_NOT_CONFIGURED", message);
+  }
+
+  static currencyLocked(message = "The company currency cannot be changed once it is set"): HttpError {
+    return new HttpError(409, "CURRENCY_LOCKED", message);
+  }
+
+  static insufficientStock(message = "Not enough stock for one or more parts", fieldErrors?: FieldErrors): HttpError {
+    return new HttpError(409, "INSUFFICIENT_STOCK", message, fieldErrors);
+  }
+
+  static technicianNotActivated(message = "This technician has not activated their account yet"): HttpError {
+    return new HttpError(409, "TECHNICIAN_NOT_ACTIVATED", message);
+  }
+
+  static technicianAlreadyActivated(message = "This technician has already activated their account"): HttpError {
+    return new HttpError(409, "TECHNICIAN_ALREADY_ACTIVATED", message);
+  }
+
+  static invalidActivationToken(message = "This activation link is invalid or has expired"): HttpError {
+    return new HttpError(400, "INVALID_ACTIVATION_TOKEN", message);
+  }
+
+  static invoiceAlreadyIssued(message = "An invoice has already been issued for this visit"): HttpError {
+    return new HttpError(409, "INVOICE_ALREADY_ISSUED", message);
   }
 }

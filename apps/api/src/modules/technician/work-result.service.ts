@@ -21,7 +21,7 @@ import { assertDeviceWithinApprovedScope } from "./work-agreement.service.js";
  * `findAssignedVisit` — a device from another request/company/visit is
  * indistinguishable from a device that doesn't exist at all.
  */
-async function assertDeviceInVisitScope(auth: TechnicianAuthContext, visit: VisitDocument, deviceId: string) {
+export async function assertDeviceInVisitScope(auth: TechnicianAuthContext, visit: VisitDocument, deviceId: string) {
   if (!visit.deviceIds.includes(deviceId)) {
     throw HttpError.notFound("Device not found on this visit");
   }

@@ -1,5 +1,6 @@
 import mongoose, { type FilterQuery, type Types } from "mongoose";
 import { HttpError } from "../../lib/http-error.js";
+import { Invoice } from "../billing/invoice.model.js";
 import { ServiceRequest } from "../requests/request.model.js";
 import { User } from "../users/user.model.js";
 import { VisitEvent } from "../visits/visit-event.model.js";
@@ -96,11 +97,17 @@ export async function listAssignedVisits(
     : [];
   const customerNameById = new Map(customers.map((customer) => [customer._id.toString(), customer.name]));
 
+  const completedIds = visits.filter((visit) => visit.status === "COMPLETED").map((visit) => visit._id);
+  const invoices = completedIds.length
+    ? await Invoice.find({ companyId: auth.companyId, visitId: { $in: completedIds } }).select("visitId")
+    : [];
+  const invoicedVisitIds = new Set(invoices.map((invoice) => invoice.visitId.toString()));
+
   return {
     items: visits.map((visit) => {
       const request = requestById.get(visit.requestId.toString()) ?? null;
       const customerName = request ? (customerNameById.get(request.customerId.toString()) ?? null) : null;
-      return toTechnicianVisitListItem(visit, request, customerName);
+      return toTechnicianVisitListItem(visit, request, customerName, invoicedVisitIds.has(visit._id.toString()));
     }),
     page: query.page,
     pageSize: query.pageSize,
@@ -123,8 +130,10 @@ export async function getAssignedVisitDetail(
   const customer = request
     ? await User.findOne({ _id: request.customerId, companyId: auth.companyId }).select("name")
     : null;
+  const invoiceIssued =
+    visit.status === "COMPLETED" && (await Invoice.exists({ companyId: auth.companyId, visitId: visit._id })) !== null;
 
-  return toTechnicianVisitDetail(visit, request, customer?.name ?? null);
+  return toTechnicianVisitDetail(visit, request, customer?.name ?? null, invoiceIssued);
 }
 
 /**

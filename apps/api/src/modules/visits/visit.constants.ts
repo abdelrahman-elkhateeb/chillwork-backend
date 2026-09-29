@@ -1,8 +1,7 @@
 /**
- * FS18 — visit scheduling constants. FS09/FS17 do not exist in this
- * repository, so none of these values come from a parent spec; they are
- * the smallest defensible defaults and live here (not scattered) so they
- * can be changed deliberately.
+ * FS18 — visit scheduling constants. These values don't come from a
+ * parent spec; they are the smallest defensible defaults and live here
+ * (not scattered) so they can be changed deliberately.
  */
 
 export const VISIT_STATUSES = ["SCHEDULED", "IN_PROGRESS", "COMPLETED", "CANCELLED"] as const;
@@ -39,6 +38,9 @@ export const VISIT_EVENT_TYPES = [
   // FS22 (on-site work agreement / approved scope):
   "WORK_ITEM_PROPOSED",
   "WORK_ITEM_DECIDED",
+  // Technician part selection and invoicing (FS11/FS25):
+  "DEVICE_PARTS_UPDATED",
+  "INVOICE_ISSUED",
 ] as const;
 export type VisitEventType = (typeof VISIT_EVENT_TYPES)[number];
 

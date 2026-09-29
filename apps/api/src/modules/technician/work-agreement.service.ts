@@ -11,6 +11,20 @@ import { DEFAULT_CURRENCY } from "./work-agreement.constants.js";
 import { WorkAgreement, type WorkAgreementDocument, type WorkItemDocument } from "./work-agreement.model.js";
 
 /**
+ * KNOWN GAP (not fixed here — see docs/api.md "On-site work agreement
+ * (FS22)" > "Current limitations"): FS11/FS25 landed in parallel with a
+ * separate per-device part-selection model, `technician/device-parts.*`,
+ * which has no decision/approval field at all — `billing/invoice.service.ts`
+ * bills any REPAIRED device's `device-parts` selection regardless of
+ * whether an APPROVED item exists here. The two models were built against
+ * the same problem (what work is the customer actually paying for) without
+ * coordinating, and have not been reconciled. Do not assume approving an
+ * item here has any effect on what gets billed until that's resolved —
+ * most likely by adding an approval gate to `device-parts` itself rather
+ * than running both item models side by side.
+ */
+
+/**
  * Deliberately duplicated from work-result.service.ts rather than
  * imported: work-result.service.ts needs to call *into* this module (see
  * `assertDeviceWithinApprovedScope` below, used by work-result.service.ts)

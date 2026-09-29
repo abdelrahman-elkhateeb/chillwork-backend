@@ -1,7 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { success } from "../../lib/envelope.js";
-import { HttpError } from "../../lib/http-error.js";
-import { IDEMPOTENCY_KEY_PATTERN } from "./request.constants.js";
+import { extractIdempotencyKey } from "../../lib/idempotency-key.js";
 import { createRequestSchema } from "./request.schemas.js";
 import { checkRequestCreationThrottle, createServiceRequest } from "./request.service.js";
 import type { ServiceRequestDocument } from "./request.model.js";
@@ -10,8 +9,7 @@ import type { ServiceRequestDocument } from "./request.model.js";
  * Never the raw Mongoose document. Deliberately excludes `analysis`/
  * `analysisMetadata` — AI output is a staff-facing concern (see
  * docs/api.md "Customer-safe response"), not something this customer
- * creation endpoint returns. `photoIds` is omitted too since it's always
- * empty right now (see the FS13 blocker note in request.service.ts).
+ * creation endpoint returns.
  */
 function toSafeServiceRequest(doc: ServiceRequestDocument) {
   return {
@@ -26,19 +24,6 @@ function toSafeServiceRequest(doc: ServiceRequestDocument) {
       originalDescription: device.originalDescription,
     })),
   };
-}
-
-function extractIdempotencyKey(req: Request): string {
-  const header = req.headers["idempotency-key"];
-  const value = Array.isArray(header) ? header[0] : header;
-
-  if (!value) {
-    throw HttpError.missingIdempotencyKey();
-  }
-  if (!IDEMPOTENCY_KEY_PATTERN.test(value)) {
-    throw HttpError.invalidIdempotencyKey();
-  }
-  return value;
 }
 
 /**
