@@ -63,6 +63,18 @@ function getParts(cookies: Record<string, string>, visitId: unknown) {
   return request(app).get(`/api/v1/technician/visits/${String(visitId)}/parts`).set("Cookie", cookieHeader(cookies));
 }
 
+function decide(cookies: Record<string, string>, visitId: unknown, deviceId: string, body: Record<string, unknown>) {
+  return sameOriginRequest(app, "post", `/api/v1/technician/visits/${String(visitId)}/devices/${deviceId}/parts/decisions`)
+    .set("Cookie", cookieHeader(cookies))
+    .send(body);
+}
+
+function putWorkResult(cookies: Record<string, string>, visitId: unknown, deviceId: string, body: Record<string, unknown>) {
+  return sameOriginRequest(app, "put", `/api/v1/technician/visits/${String(visitId)}/work-results/${deviceId}`)
+    .set("Cookie", cookieHeader(cookies))
+    .send(body);
+}
+
 describe("PUT /technician/visits/:visitId/devices/:deviceId/parts", () => {
   it("snapshots catalog prices and returns line totals", async () => {
     const w = await world();
@@ -76,15 +88,20 @@ describe("PUT /technician/visits/:visitId/devices/:deviceId/parts", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({
+    expect(res.body.data).toMatchObject({
       clientDeviceId: "d1",
       items: [
-        { partId: String(w.motor._id), name: "Fan Motor", unitPriceMinor: 45000, quantity: 1, lineTotalMinor: 45000 },
-        { partId: String(w.cap._id), name: "Capacitor", unitPriceMinor: 8000, quantity: 2, lineTotalMinor: 16000 },
+        { partId: String(w.motor._id), name: "Fan Motor", unitPriceMinor: 45000, quantity: 1, lineTotalMinor: 45000, decision: "PROPOSED", decidedAt: null },
+        { partId: String(w.cap._id), name: "Capacitor", unitPriceMinor: 8000, quantity: 2, lineTotalMinor: 16000, decision: "PROPOSED", decidedAt: null },
       ],
       partsMinor: 61000,
       version: 1,
     });
+    // Every new proposal gets its own stable, distinct identity.
+    const [motorItem, capItem] = res.body.data.items;
+    expect(motorItem.proposalId).toEqual(expect.any(String));
+    expect(capItem.proposalId).toEqual(expect.any(String));
+    expect(motorItem.proposalId).not.toBe(capItem.proposalId);
     expect((await VisitEvent.find({ visitId: w.visit._id })).map((e) => e.type)).toEqual(["DEVICE_PARTS_UPDATED"]);
   });
 
@@ -361,24 +378,326 @@ describe("GET /technician/visits/:visitId/parts", () => {
 
     const res = await getParts(w.tech.cookies, w.visit._id);
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({
+    expect(res.body.data).toMatchObject({
       visitId: String(w.visit._id),
       currency: "EGP",
       devices: [
         { clientDeviceId: "d1", items: [], partsMinor: 0, version: 0 },
         {
           clientDeviceId: "d2",
-          items: [{ partId: String(w.cap._id), name: "Capacitor", unitPriceMinor: 8000, quantity: 1, lineTotalMinor: 8000 }],
+          items: [
+            {
+              partId: String(w.cap._id),
+              name: "Capacitor",
+              unitPriceMinor: 8000,
+              quantity: 1,
+              lineTotalMinor: 8000,
+              decision: "PROPOSED",
+              decidedAt: null,
+            },
+          ],
           partsMinor: 8000,
           version: 1,
         },
       ],
     });
+    expect(res.body.data.devices[1].items[0].proposalId).toEqual(expect.any(String));
   });
 
   it("is readable after the visit is completed", async () => {
     const w = await world();
     await Visit.updateOne({ _id: w.visit._id }, { $set: { status: "COMPLETED" } });
     expect((await getParts(w.tech.cookies, w.visit._id)).status).toBe(200);
+  });
+});
+
+describe("POST /technician/visits/:visitId/devices/:deviceId/parts/decisions", () => {
+  it("moves a PROPOSED proposal to APPROVED", async () => {
+    const w = await world();
+    const proposed = await put(w.tech.cookies, w.visit._id, "d1", {
+      items: [{ partId: String(w.motor._id), quantity: 1 }],
+      version: 0,
+    });
+    const proposalId = proposed.body.data.items[0].proposalId;
+
+    const res = await decide(w.tech.cookies, w.visit._id, "d1", {
+      version: 1,
+      decisions: [{ proposalId, decision: "APPROVED" }],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.data.version).toBe(2);
+    expect(res.body.data.items[0]).toMatchObject({ proposalId, decision: "APPROVED" });
+    expect(res.body.data.items[0].decidedAt).not.toBeNull();
+  });
+
+  it("moves a PROPOSED proposal to REJECTED", async () => {
+    const w = await world();
+    const proposed = await put(w.tech.cookies, w.visit._id, "d1", {
+      items: [{ partId: String(w.motor._id), quantity: 1 }],
+      version: 0,
+    });
+    const proposalId = proposed.body.data.items[0].proposalId;
+
+    const res = await decide(w.tech.cookies, w.visit._id, "d1", {
+      version: 1,
+      decisions: [{ proposalId, decision: "REJECTED" }],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.data.items[0].decision).toBe("REJECTED");
+    // A rejected proposal drops out of the running total.
+    expect(res.body.data.partsMinor).toBe(0);
+  });
+
+  it("rejects deciding a proposal that was already decided", async () => {
+    const w = await world();
+    const proposed = await put(w.tech.cookies, w.visit._id, "d1", {
+      items: [{ partId: String(w.motor._id), quantity: 1 }],
+      version: 0,
+    });
+    const proposalId = proposed.body.data.items[0].proposalId;
+    await decide(w.tech.cookies, w.visit._id, "d1", { version: 1, decisions: [{ proposalId, decision: "APPROVED" }] });
+
+    const redecide = await decide(w.tech.cookies, w.visit._id, "d1", {
+      version: 2,
+      decisions: [{ proposalId, decision: "REJECTED" }],
+    });
+    expect(redecide.status).toBe(400);
+    expect(redecide.body.error.code).toBe("VALIDATION_ERROR");
+    const stored = await DeviceParts.findOne({ visitId: w.visit._id, clientDeviceId: "d1" });
+    expect(stored?.items[0]?.decision).toBe("APPROVED");
+  });
+
+  it("rejects a decision for an unknown proposalId", async () => {
+    const w = await world();
+    await put(w.tech.cookies, w.visit._id, "d1", { items: [{ partId: String(w.motor._id), quantity: 1 }], version: 0 });
+    const res = await decide(w.tech.cookies, w.visit._id, "d1", {
+      version: 1,
+      decisions: [{ proposalId: "0".repeat(24), decision: "APPROVED" }],
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("returns 404 when nothing has been proposed for this device yet", async () => {
+    const w = await world();
+    const res = await decide(w.tech.cookies, w.visit._id, "d1", {
+      version: 1,
+      decisions: [{ proposalId: "0".repeat(24), decision: "APPROVED" }],
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("rejects a stale version", async () => {
+    const w = await world();
+    const proposed = await put(w.tech.cookies, w.visit._id, "d1", {
+      items: [{ partId: String(w.motor._id), quantity: 1 }],
+      version: 0,
+    });
+    const proposalId = proposed.body.data.items[0].proposalId;
+    const res = await decide(w.tech.cookies, w.visit._id, "d1", {
+      version: 99,
+      decisions: [{ proposalId, decision: "APPROVED" }],
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("VERSION_CONFLICT");
+  });
+
+  it("does not let two concurrent decisions from the same base version both apply", async () => {
+    const w = await world();
+    const proposed = await put(w.tech.cookies, w.visit._id, "d1", {
+      items: [
+        { partId: String(w.motor._id), quantity: 1 },
+        { partId: String(w.cap._id), quantity: 1 },
+      ],
+      version: 0,
+    });
+    const [motorProposalId, capProposalId] = proposed.body.data.items.map((i: { proposalId: string }) => i.proposalId);
+
+    const [a, b] = await Promise.all([
+      decide(w.tech.cookies, w.visit._id, "d1", { version: 1, decisions: [{ proposalId: motorProposalId, decision: "APPROVED" }] }),
+      decide(w.tech.cookies, w.visit._id, "d1", { version: 1, decisions: [{ proposalId: capProposalId, decision: "REJECTED" }] }),
+    ]);
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([200, 409]);
+  });
+
+  it("denies a technician from another company (uniform 404)", async () => {
+    const w = await world();
+    const otherCompany = await createCompany();
+    const other = await member(otherCompany._id, "TECHNICIAN");
+    await put(w.tech.cookies, w.visit._id, "d1", { items: [{ partId: String(w.motor._id), quantity: 1 }], version: 0 });
+    const res = await decide(other.cookies, w.visit._id, "d1", { version: 1, decisions: [{ proposalId: "0".repeat(24), decision: "APPROVED" }] });
+    expect(res.status).toBe(404);
+  });
+
+  it.each(["ADMIN", "CUSTOMER"] as const)("denies a %s with 403", async (role) => {
+    const w = await world();
+    await put(w.tech.cookies, w.visit._id, "d1", { items: [{ partId: String(w.motor._id), quantity: 1 }], version: 0 });
+    const other = await member(w.company._id, role);
+    const res = await decide(other.cookies, w.visit._id, "d1", { version: 1, decisions: [{ proposalId: "0".repeat(24), decision: "APPROVED" }] });
+    expect(res.status).toBe(403);
+  });
+
+  it("stops the old technician immediately after reassignment and grants the new one", async () => {
+    const w = await world();
+    const b = await member(w.company._id, "TECHNICIAN");
+    const proposed = await put(w.tech.cookies, w.visit._id, "d1", {
+      items: [{ partId: String(w.motor._id), quantity: 1 }],
+      version: 0,
+    });
+    const proposalId = proposed.body.data.items[0].proposalId;
+
+    await Visit.updateOne({ _id: w.visit._id }, { $set: { technicianId: b.user._id } });
+
+    const aBlocked = await decide(w.tech.cookies, w.visit._id, "d1", { version: 1, decisions: [{ proposalId, decision: "APPROVED" }] });
+    expect(aBlocked.status).toBe(404);
+
+    const bAllowed = await decide(b.cookies, w.visit._id, "d1", { version: 1, decisions: [{ proposalId, decision: "APPROVED" }] });
+    expect(bAllowed.status).toBe(200);
+  });
+});
+
+describe("re-proposal after rejection", () => {
+  it("re-proposing the same part after rejection creates a new proposalId and never mutates the old one", async () => {
+    const w = await world();
+    const first = await put(w.tech.cookies, w.visit._id, "d1", {
+      items: [{ partId: String(w.motor._id), quantity: 1 }],
+      version: 0,
+    });
+    const firstProposalId = first.body.data.items[0].proposalId;
+    await decide(w.tech.cookies, w.visit._id, "d1", { version: 1, decisions: [{ proposalId: firstProposalId, decision: "REJECTED" }] });
+
+    // Re-propose the same catalog part.
+    const second = await put(w.tech.cookies, w.visit._id, "d1", {
+      items: [{ partId: String(w.motor._id), quantity: 1 }],
+      version: 2,
+    });
+    expect(second.status).toBe(200);
+    expect(second.body.data.items).toHaveLength(2);
+
+    const rejected = second.body.data.items.find((i: { proposalId: string }) => i.proposalId === firstProposalId);
+    const newProposal = second.body.data.items.find((i: { proposalId: string }) => i.proposalId !== firstProposalId);
+
+    expect(rejected).toMatchObject({ decision: "REJECTED" });
+    expect(newProposal).toMatchObject({ decision: "PROPOSED", partId: String(w.motor._id) });
+    expect(newProposal.proposalId).not.toBe(firstProposalId);
+
+    // The new proposal can now be independently approved without touching the old one.
+    const approved = await decide(w.tech.cookies, w.visit._id, "d1", {
+      version: 3,
+      decisions: [{ proposalId: newProposal.proposalId, decision: "APPROVED" }],
+    });
+    expect(approved.status).toBe(200);
+    const stillRejected = approved.body.data.items.find((i: { proposalId: string }) => i.proposalId === firstProposalId);
+    expect(stillRejected.decision).toBe("REJECTED");
+  });
+});
+
+describe("legacy DeviceParts compatibility", () => {
+  it("a legacy item (no decision field at all) is distinguishable from a new PROPOSED item and keeps working", async () => {
+    const w = await world();
+    await DeviceParts.create({
+      companyId: w.company._id,
+      visitId: w.visit._id,
+      requestId: w.req._id,
+      clientDeviceId: "d1",
+      currency: "EGP",
+      items: [{ partId: w.motor._id, name: "Fan Motor", unitPriceMinor: 45000, quantity: 1 }],
+      version: 1,
+      updatedById: w.tech.user._id,
+    });
+
+    const res = await getParts(w.tech.cookies, w.visit._id);
+    const legacyItem = res.body.data.devices.find((d: { clientDeviceId: string }) => d.clientDeviceId === "d1").items[0];
+    expect(legacyItem.decision).toBeNull();
+    expect(legacyItem.proposalId).toBeNull();
+
+    // Touching the device with an unrelated new pick doesn't retroactively
+    // tag the legacy item — but leaving its partId out of a full replace
+    // still drops it, matching this endpoint's original full-replace
+    // behavior for anything that was never decided.
+    const cleared = await put(w.tech.cookies, w.visit._id, "d1", { items: [], version: 1 });
+    expect(cleared.body.data.items).toEqual([]);
+  });
+});
+
+describe("FS23 -> FS11 boundary", () => {
+  it("approved parts allow REPAIRED", async () => {
+    const w = await world();
+    const proposed = await put(w.tech.cookies, w.visit._id, "d1", {
+      items: [{ partId: String(w.motor._id), quantity: 1 }],
+      version: 0,
+    });
+    await decide(w.tech.cookies, w.visit._id, "d1", {
+      version: 1,
+      decisions: [{ proposalId: proposed.body.data.items[0].proposalId, decision: "APPROVED" }],
+    });
+
+    const res = await putWorkResult(w.tech.cookies, w.visit._id, "d1", { result: "REPAIRED", version: 0 });
+    expect(res.status).toBe(200);
+  });
+
+  it("a rejected-only proposal blocks REPAIRED but allows FAILED/CUSTOMER_REFUSED", async () => {
+    const w = await world();
+    const proposed = await put(w.tech.cookies, w.visit._id, "d1", {
+      items: [{ partId: String(w.motor._id), quantity: 1 }],
+      version: 0,
+    });
+    await decide(w.tech.cookies, w.visit._id, "d1", {
+      version: 1,
+      decisions: [{ proposalId: proposed.body.data.items[0].proposalId, decision: "REJECTED" }],
+    });
+
+    const repaired = await putWorkResult(w.tech.cookies, w.visit._id, "d1", { result: "REPAIRED", version: 0 });
+    expect(repaired.status).toBe(409);
+    expect(repaired.body.error.code).toBe("WORK_NOT_APPROVED");
+    expect(await WorkResult.countDocuments({})).toBe(0);
+
+    const failed = await putWorkResult(w.tech.cookies, w.visit._id, "d1", {
+      result: "FAILED",
+      failureReason: "CUSTOMER_REFUSED",
+      version: 0,
+    });
+    expect(failed.status).toBe(200);
+  });
+
+  it("a still-undecided proposal blocks any work result", async () => {
+    const w = await world();
+    await put(w.tech.cookies, w.visit._id, "d1", { items: [{ partId: String(w.motor._id), quantity: 1 }], version: 0 });
+    const res = await putWorkResult(w.tech.cookies, w.visit._id, "d1", { result: "REPAIRED", version: 0 });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("WORK_NOT_APPROVED");
+  });
+
+  it("mixed approved/rejected proposals on the same device: REPAIRED is allowed (device has an approved item)", async () => {
+    const w = await world();
+    const proposed = await put(w.tech.cookies, w.visit._id, "d1", {
+      items: [
+        { partId: String(w.motor._id), quantity: 1 },
+        { partId: String(w.cap._id), quantity: 1 },
+      ],
+      version: 0,
+    });
+    const [motorItem, capItem] = proposed.body.data.items;
+    await decide(w.tech.cookies, w.visit._id, "d1", {
+      version: 1,
+      decisions: [
+        { proposalId: motorItem.proposalId, decision: "APPROVED" },
+        { proposalId: capItem.proposalId, decision: "REJECTED" },
+      ],
+    });
+
+    // The device-level gate only asks "is anything approved" — the
+    // per-part correctness (rejected capacitor never billed) is enforced
+    // separately, in billing/invoice.service.ts, and is covered by
+    // tests/invoices.test.ts's "mixed proposals on one device" test.
+    const res = await putWorkResult(w.tech.cookies, w.visit._id, "d1", { result: "REPAIRED", version: 0 });
+    expect(res.status).toBe(200);
+  });
+
+  it("falls back to the FS18 device-scope-only boundary when no DeviceParts exist for the device at all", async () => {
+    const w = await world();
+    const res = await putWorkResult(w.tech.cookies, w.visit._id, "d1", { result: "REPAIRED", version: 0 });
+    expect(res.status).toBe(200);
   });
 });
