@@ -8,7 +8,7 @@ import type { Currency } from "../companies/company-settings.constants.js";
 import { requireBillingSettings } from "../companies/company-settings.service.js";
 import { REFERENCE_ALPHABET, REFERENCE_RANDOM_LENGTH } from "../requests/request.constants.js";
 import { ServiceRequest } from "../requests/request.model.js";
-import { DeviceParts } from "../technician/device-parts.model.js";
+import { DeviceParts, type SelectedPart } from "../technician/device-parts.model.js";
 import { lineTotalMinor } from "../technician/device-parts.service.js";
 import { findAssignedVisit, type TechnicianAuthContext } from "../technician/technician-visit.service.js";
 import type { FailureReason, WorkResultValue } from "../technician/work-result.constants.js";
@@ -36,30 +36,40 @@ interface DraftInputs {
   visit: VisitDocument;
   labels: ReadonlyMap<string, string>;
   results: ReadonlyMap<string, { result: WorkResultValue; failureReason: FailureReason | null }>;
-  selections: ReadonlyMap<string, Array<{ partId: Types.ObjectId; name: string; unitPriceMinor: number; quantity: number }>>;
+  selections: ReadonlyMap<string, readonly SelectedPart[]>;
   currency: Currency;
   laborFeeMinor: number;
 }
 
+/** `null`/`undefined` is a legacy item (predates approval decisions) — kept billable exactly as before. PROPOSED/REJECTED are not. */
+function isEligibleForBilling(item: SelectedPart): boolean {
+  return item.decision == null || item.decision === "APPROVED";
+}
+
 /**
  * The whole pricing rule, as a pure function. Only a REPAIRED device is
- * billable: its picked parts (at their snapshotted prices) plus one labor
- * fee. A FAILED or not-yet-resolved device contributes zero and lists no
- * parts, since nothing was fitted/billed for it. Integer minor units
- * throughout — sums and integer products only, so there is no rounding.
+ * billable, and only its *approved* picked parts count: an unapproved
+ * (still-PROPOSED) or REJECTED proposal never contributes, even when the
+ * device has other, approved parts (see `isEligibleForBilling`) — plus one
+ * labor fee. A FAILED or not-yet-resolved device contributes zero and
+ * lists no parts, since nothing was fitted/billed for it. Integer minor
+ * units throughout — sums and integer products only, so there is no
+ * rounding.
  */
 export function buildInvoiceDraft(inputs: DraftInputs): InvoiceDraft {
   const devices = inputs.visit.deviceIds.map((deviceId): DraftDevice => {
     const outcome = inputs.results.get(deviceId);
     const billable = outcome?.result === "REPAIRED";
     const parts = billable
-      ? (inputs.selections.get(deviceId) ?? []).map((item) => ({
-          partId: item.partId,
-          name: item.name,
-          unitPriceMinor: item.unitPriceMinor,
-          quantity: item.quantity,
-          lineTotalMinor: lineTotalMinor(item),
-        }))
+      ? (inputs.selections.get(deviceId) ?? [])
+          .filter(isEligibleForBilling)
+          .map((item) => ({
+            partId: item.partId,
+            name: item.name,
+            unitPriceMinor: item.unitPriceMinor,
+            quantity: item.quantity,
+            lineTotalMinor: lineTotalMinor(item),
+          }))
       : [];
     const partsMinor = parts.reduce((sum, line) => sum + line.lineTotalMinor, 0);
     const laborMinor = billable ? inputs.laborFeeMinor : 0;

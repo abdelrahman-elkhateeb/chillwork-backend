@@ -8,9 +8,13 @@ import { findAssignedVisit, type TechnicianAuthContext } from "./technician-visi
 import type { RecordWorkResultInput } from "./work-result.schemas.js";
 import { WorkResult, type WorkResultDocument } from "./work-result.model.js";
 import type { VisitOutcome } from "./work-result.constants.js";
-// FS22 -> FS23 boundary. work-agreement.service.ts does not import
-// anything from this file, so this stays a one-way dependency (no cycle).
-import { assertDeviceWithinApprovedScope } from "./work-agreement.service.js";
+// FS11 -> FS23 boundary. Only the DeviceParts *model* is imported here,
+// never device-parts.service.ts: that service already imports
+// `assertDeviceInVisitScope` from this file, so importing its service
+// back here would be a circular dependency between the two service
+// files. (This replaces the old WorkAgreement-based check — see
+// work-agreement.service.ts, now deprecated.)
+import { DeviceParts } from "./device-parts.model.js";
 
 /**
  * The device must be part of *this* visit's assigned scope, and it must
@@ -67,6 +71,55 @@ async function touchAssignedInProgressVisit(
 }
 
 /**
+ * The FS11 -> FS23 boundary: a device's actual-work outcome must be
+ * backed by an approved DeviceParts proposal.
+ *
+ * - No `DeviceParts` document exists for this visit/device, or none of
+ *   its items have ever been through a decision (only legacy items with
+ *   no `decision` field at all): DeviceParts has not been used for this
+ *   device — falls back to the original FS18-only boundary (Visit scope
+ *   only), preserving every visit/device that predates this feature.
+ * - At least one tracked (decision-bearing) item exists but none has
+ *   been decided yet (all still `PROPOSED`): every write is rejected —
+ *   nothing can be recorded while the customer's decision is pending.
+ * - Recording `REPAIRED` requires at least one `APPROVED` item for that
+ *   device, else rejected — a technician can never execute/bill work
+ *   nothing was ever approved for. This is necessarily device-level (a
+ *   `WorkResult` cannot represent partial per-part outcomes — see
+ *   docs/api.md); the *specific* per-part correctness (a rejected item
+ *   never gets invoiced even when the device has another approved item)
+ *   is enforced separately, per line, in billing/invoice.service.ts.
+ * - Recording `FAILED` only requires the device to have been decided at
+ *   all — a device whose only tracked item was `REJECTED` can still get
+ *   `FAILED`/`CUSTOMER_REFUSED`, because that rejection *is* the refusal
+ *   FS23 documents.
+ */
+async function assertDeviceApprovedForActualWork(
+  auth: TechnicianAuthContext,
+  visitId: Types.ObjectId,
+  deviceId: string,
+  result: "REPAIRED" | "FAILED"
+): Promise<void> {
+  const deviceParts = await DeviceParts.findOne({ companyId: auth.companyId, visitId, clientDeviceId: deviceId }).select(
+    "items"
+  );
+  if (!deviceParts) {
+    return;
+  }
+  const tracked = deviceParts.items.filter((item) => item.decision != null);
+  if (tracked.length === 0) {
+    return;
+  }
+  const decided = tracked.filter((item) => item.decision === "APPROVED" || item.decision === "REJECTED");
+  if (decided.length === 0) {
+    throw HttpError.workNotApproved("This device's proposed parts are still awaiting the customer's decision");
+  }
+  if (result === "REPAIRED" && !decided.some((item) => item.decision === "APPROVED")) {
+    throw HttpError.workNotApproved("No approved parts exist for this device");
+  }
+}
+
+/**
  * Create-or-update a device's work result under optimistic concurrency.
  * `version` is what the caller believes is current: 0 means "I don't
  * think a result exists yet", and every accepted write increments the
@@ -88,11 +141,7 @@ export async function recordWorkResult(
 ): Promise<WorkResultDocument> {
   const visit = await findAssignedVisit(auth, visitId);
   await assertDeviceInVisitScope(auth, visit, deviceId);
-  // FS22 boundary: gated only once a work agreement actually exists for
-  // this device — see assertDeviceWithinApprovedScope's own comment in
-  // work-agreement.service.ts for the documented fallback when it does
-  // not (visits/devices that predate FS22 adoption).
-  await assertDeviceWithinApprovedScope(auth, visit._id, deviceId, input.result);
+  await assertDeviceApprovedForActualWork(auth, visit._id, deviceId, input.result);
 
   const session = await mongoose.startSession();
   try {

@@ -11,29 +11,31 @@ import { DEFAULT_CURRENCY } from "./work-agreement.constants.js";
 import { WorkAgreement, type WorkAgreementDocument, type WorkItemDocument } from "./work-agreement.model.js";
 
 /**
- * KNOWN GAP (not fixed here — see docs/api.md "On-site work agreement
- * (FS22)" > "Current limitations"): FS11/FS25 landed in parallel with a
- * separate per-device part-selection model, `technician/device-parts.*`,
- * which has no decision/approval field at all — `billing/invoice.service.ts`
- * bills any REPAIRED device's `device-parts` selection regardless of
- * whether an APPROVED item exists here. The two models were built against
- * the same problem (what work is the customer actually paying for) without
- * coordinating, and have not been reconciled. Do not assume approving an
- * item here has any effect on what gets billed until that's resolved —
- * most likely by adding an approval gate to `device-parts` itself rather
- * than running both item models side by side.
+ * DEPRECATED — this whole module is no longer an active dependency of
+ * anything. It was FS22's original approval authority, but FS11/FS25
+ * landed in parallel with a separate, catalog-backed per-device part
+ * model, `technician/device-parts.*`, which `billing/invoice.service.ts`
+ * actually bills from. Rather than keep two approval systems, the
+ * decision state machine this module pioneered (PROPOSED -> APPROVED /
+ * REJECTED, one-way, immutable once decided) was ported directly onto
+ * `DeviceParts.items[]` (see device-parts.model.ts/.service.ts) —
+ * `work-result.service.ts`'s actual-work gate and `invoice.service.ts`'s
+ * billing eligibility both read DeviceParts now, not WorkAgreement.
+ *
+ * This module, its routes, and its tests are kept mounted/passing for
+ * historical reference and backward compatibility (an existing caller
+ * doesn't get a broken endpoint), but proposing or deciding a
+ * WorkAgreement item has no effect on FS23 or FS25 — see docs/api.md
+ * "Device part proposals and decisions" for the active system.
  */
 
 /**
  * Deliberately duplicated from work-result.service.ts rather than
- * imported: work-result.service.ts needs to call *into* this module (see
- * `assertDeviceWithinApprovedScope` below, used by work-result.service.ts)
- * to enforce the FS22 -> FS23 boundary, so this module cannot import back
- * from work-result.service.ts without a circular dependency between the
- * two service files. Both copies must stay in sync with the same
- * assigned-visit + device-scope rules; there is no third module to host a
- * shared version of this without a larger restructuring this task does
- * not call for.
+ * imported, to avoid a circular dependency between the two service files
+ * (historical reasoning from when `assertDeviceWithinApprovedScope` below
+ * was still called from work-result.service.ts — see the deprecation
+ * note above). Kept as-is since this module is deprecated in place, not
+ * actively maintained.
  */
 async function assertItemDeviceInVisitScope(auth: TechnicianAuthContext, visit: VisitDocument, deviceId: string) {
   if (!visit.deviceIds.includes(deviceId)) {
@@ -334,26 +336,12 @@ export async function getWorkAgreement(auth: TechnicianAuthContext, visitId: str
 }
 
 /**
- * The FS22 -> FS23 boundary. Called from work-result.service.ts before a
- * work result is recorded (see the comment there for why this lives here
- * rather than being imported the other way around).
- *
- * - No WorkAgreement exists for this visit, or none of its items name
- *   this device: FS22 has not been used for this device yet. Falls back
- *   to FS23's original interim boundary (Visit.deviceIds + request scope
- *   only) rather than blocking every visit that predates FS22 — see
- *   docs/api.md "On-site work agreement (FS22)" for why this fallback
- *   exists and what it does not guarantee.
- * - At least one item exists for this device but none has been decided
- *   yet: nothing can be recorded — the customer has not agreed to
- *   anything for this device yet.
- * - Recording REPAIRED requires at least one APPROVED item for this
- *   device (you cannot claim to have repaired something nothing was ever
- *   approved for).
- * - Recording FAILED only requires the device to have been decided at
- *   all — a REJECTED-only device can still get FAILED/CUSTOMER_REFUSED,
- *   because refusal is what a rejection *is* (see docs/api.md "Visit
- *   lifecycle").
+ * DEPRECATED / UNUSED — no longer called from work-result.service.ts (see
+ * the module-level deprecation note at the top of this file). Retained,
+ * unmodified, purely so this file's own tests keep exercising real
+ * behavior; `work-result.service.ts`'s current equivalent is
+ * `assertDeviceApprovedForActualWork`, reading `DeviceParts` instead of
+ * `WorkAgreement`.
  */
 export async function assertDeviceWithinApprovedScope(
   auth: TechnicianAuthContext,

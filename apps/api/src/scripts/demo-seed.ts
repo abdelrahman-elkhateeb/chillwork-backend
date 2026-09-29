@@ -4,7 +4,7 @@ import { Part, partNameKey } from "../modules/catalog/part.model.js";
 import { PartStockMovement } from "../modules/catalog/part-stock-movement.model.js";
 import { Company } from "../modules/companies/company.model.js";
 import { ServiceRequest } from "../modules/requests/request.model.js";
-import { setDeviceParts } from "../modules/technician/device-parts.service.js";
+import { recordPartDecisions, setDeviceParts } from "../modules/technician/device-parts.service.js";
 import { completeVisit, startVisit } from "../modules/technician/technician-visit.service.js";
 import { recordWorkResult } from "../modules/technician/work-result.service.js";
 import { hashPassword } from "../modules/users/password.js";
@@ -259,12 +259,18 @@ export async function seedDemo(demoCompanyId: Types.ObjectId, password: string):
   // 1. Completed yesterday, partially repaired, invoiced (parts + labor for one device).
   const partial = await schedule(monaHome._id, omar.userId, ["living-room", "bedroom"], -1, 7);
   await startVisit(omar, String(partial._id));
-  await setDeviceParts(omar, String(partial._id), "living-room", {
+  const livingRoomParts = await setDeviceParts(omar, String(partial._id), "living-room", {
     items: [
       { partId: partId("motor"), quantity: 1 },
       { partId: partId("capacitor"), quantity: 1 },
     ],
     version: 0,
+  });
+  // Approve the picked parts — a REPAIRED device now requires at least one
+  // approved DeviceParts proposal (see work-result.service.ts).
+  await recordPartDecisions(omar, String(partial._id), "living-room", {
+    version: livingRoomParts.version,
+    decisions: livingRoomParts.items.map((item) => ({ proposalId: item.proposalId!, decision: "APPROVED" })),
   });
   await recordWorkResult(omar, String(partial._id), "living-room", { result: "REPAIRED", version: 0 });
   await recordWorkResult(omar, String(partial._id), "bedroom", {
