@@ -1155,7 +1155,24 @@ invoice endpoints).
 `status`, because `status` sits between the technician and `startAt` and the list would
 sort in memory. With a `status` the older index still applies.
 
-## On-site work agreement (FS22)
+## On-site work agreement (FS22) — DEPRECATED
+
+> **This feature is deprecated and no longer an active dependency of anything.**
+> It was FS22's original approval authority, recording a technician's proposed
+> work and the customer's on-site decision on it. FS11/FS25 landed in parallel
+> with a separate, catalog-backed model — `technician/device-parts.*` — that
+> `billing/invoice.service.ts` actually bills from. Rather than keep two
+> approval systems, the decision state machine this feature pioneered
+> (`PROPOSED -> APPROVED / REJECTED`, one-way, immutable once decided) was
+> ported directly onto `DeviceParts` items. **See "Device part proposals and
+> decisions" below for the active system** — `work-result.service.ts`'s
+> actual-work gate and `invoice.service.ts`'s billing eligibility both read
+> `DeviceParts` now, never `WorkAgreement`.
+>
+> The routes below remain mounted and fully functional (proposing/deciding a
+> `WorkAgreement` item still works exactly as documented) purely for backward
+> compatibility with any existing caller — but doing so has **no effect** on
+> FS23 or FS25. The rest of this section is kept for historical reference.
 
 Technician-only (`TECHNICIAN` role), the same authorization chain as FS19/FS23:
 `authenticate` -> `requireRole("TECHNICIAN")` -> `findAssignedVisit` (company +
@@ -1163,17 +1180,12 @@ Technician-only (`TECHNICIAN` role), the same authorization chain as FS19/FS23:
 [CSRF/origin guard](#csrforigin-protection) and only allowed while the visit is
 `IN_PROGRESS` (`409 VISIT_STATUS_CONFLICT` otherwise, including once `COMPLETED`).
 
-> **What this is:** the customer's on-site agreement to a technician's proposed
+> **What this was:** the customer's on-site agreement to a technician's proposed
 > work, recorded by the technician — **not** an online customer-facing approval
 > page, a Quote/Invoice document, or a payment flow. There is no customer account
 > action anywhere in this feature; every write is `req.auth`-scoped to the
 > assigned technician, and the "customer decision" is the technician's
 > contemporaneous record of what the customer said in person.
->
-> This is the boundary the product flow describes as:
-> `Proposed Work -> Customer Agreement -> Approved Scope`, feeding FS23 (actual
-> work) below and, eventually, FS25 (invoice) — neither of which this feature
-> implements.
 
 ### Domain model
 
@@ -1341,36 +1353,15 @@ agreement, in `work-result.service.ts`'s `assertDeviceWithinApprovedScope`:
   `FAILED`/`CUSTOMER_REFUSED`, because that rejection *is* the refusal FS23
   documents (see "Technician work execution (FS23)" below, "Visit lifecycle").
 
-### Current limitations
+### Current limitations (historical — this feature is deprecated)
 
-* **FS22 is not consulted by billing.** FS11 (parts catalog) and FS25
-  (invoicing) were built in parallel against `technician/device-parts.*`, a
-  separate per-device part-selection model with **no decision/approval field
-  at all** — `billing/invoice.service.ts` bills any `REPAIRED` device's
-  `device-parts` selection regardless of whether an `APPROVED` `WorkAgreement`
-  item exists for it. In practice this means a part can currently be picked
-  and billed without ever going through FS22's proposed -> approved workflow.
-  This is an open reconciliation between FS22 and FS11/FS25 (not a design
-  decision), most likely resolved by adding an approval gate to
-  `device-parts` itself rather than running both item models side by side —
-  see the module-level comment on `work-agreement.service.ts` for the same
-  note in code.
-* **The fallback above is a real, deliberate gap, not an oversight.** FS23 was
-  implemented and shipped before FS22 existed, with 43 passing tests that never
-  create a `WorkAgreement`. Making the FS22 gate unconditional would break every
-  one of those scenarios (and every visit that predates FS22 adoption) with no
-  migration path — there is no FS21 (inspection) yet to guarantee a proposal
-  happens before execution. The gate is real and enforced **once a technician
-  actually proposes work for a device**; until then, FS18's original
-  `Visit.deviceIds` boundary still applies unchanged.
-* **`completeVisit`'s required-device set is intentionally unchanged** — it
-  still requires every device in `Visit.deviceIds` to have a work result, not
-  "every device with a decided agreement item." Changing that would need a
-  product decision this task did not make (what happens to a device that was
-  never proposed/decided at all — must it still block completion?) and risks
-  diverging from the already-tested FS23 completion behavior. Flagged as a
-  remaining decision for whenever FS21 exists and visits are guaranteed to go
-  through inspection first.
+* **Superseded, not fixed here.** These limitations applied while
+  `WorkAgreement` was still FS23/FS25's approval source. They are kept for
+  history; the reconciliation they describe was resolved by moving decisions
+  onto `DeviceParts` instead — see "Device part proposals and decisions" below
+  for the current, active rules (including the equivalent fallback-for-legacy-
+  data behavior, `completeVisit`'s unchanged `Visit.deviceIds` requirement, and
+  why FS21 not existing still matters).
 * No photos (FS13 was cancelled for the MVP; none is referenced here). FS22's
   own items are free-text/technician-priced (`partIdentifier` is a free
   string) — they do not use FS11's parts catalog, unlike `device-parts` (see
@@ -1385,23 +1376,23 @@ Technician-only (`TECHNICIAN` role), same authorization chain as FS19:
 cached/earlier fetch). All mutating routes below are also behind the
 [CSRF/origin guard](#csrforigin-protection).
 
-> **Dependency note:** FS22 ("On-site work agreement," above) now exists and
-> supplies a real approved-scope check — see "FS22 -> FS23 boundary" above for
-> exactly what is and is not enforced. `Visit.deviceIds` (the set an admin
-> already assigned to the visit) remains the boundary for **completing** a visit
-> and for any device FS22 has not been used on yet; it is no longer the only
-> word on whether a specific `REPAIRED`/`FAILED` write is allowed. No
-> photo/evidence handling is included (FS13 was cancelled for the MVP).
+> **Dependency note:** recording a work result is gated by FS11's
+> `DeviceParts` approval decisions — see "Device part proposals and decisions"
+> below ("FS23 boundary") for exactly what is and is not enforced.
+> `Visit.deviceIds` (the set an admin already assigned to the visit) remains
+> the boundary for **completing** a visit and for any device `DeviceParts` has
+> not been used on yet; it is no longer the only word on whether a specific
+> `REPAIRED`/`FAILED` write is allowed. No photo/evidence handling is included
+> (FS13 was cancelled for the MVP).
 >
 > **FS23 itself still computes nothing billable — pricing/invoicing is FS25's
-> job, and FS25 currently reads `device-parts` (FS11's per-device part
-> selection, see "Technician part selection" below) + `WorkResult`, not FS22's
-> `WorkAgreement`.** That means a part picked via `device-parts` and billed on
-> a `REPAIRED` device is *not* currently required to have gone through FS22's
-> proposed → approved workflow at all — the two features were built in
-> parallel against the same problem (what work is the customer actually paying
-> for) and have not been reconciled. See "On-site work agreement (FS22)" >
-> "Current limitations" above.
+> job.** FS25 reads `DeviceParts` (FS11's per-device part selection, see
+> "Device part proposals and decisions" below) + `WorkResult`. A part is only
+> billed on a `REPAIRED` device once its own proposal is `APPROVED` — a
+> `PROPOSED` or `REJECTED` proposal on the same device never contributes, even
+> when another proposal on that device is approved. (`WorkAgreement`, FS22's
+> original approval model, is deprecated and no longer consulted by either
+> FS23 or FS25 — see "On-site work agreement (FS22)" above.)
 
 ### Visit lifecycle transitions
 
@@ -1616,13 +1607,14 @@ Every stock change (initial stock, admin adjustment, invoice issuance) writes a
 `PartStockMovement` (`delta`, `quantityAfter`, `reason`, actor, time, and the invoice
 for issuance) in the same transaction as the change.
 
-## Technician part selection
+## Device part proposals and decisions
 
-The technician picks, per device, the catalog parts they are fitting — this is the
-price the customer sees and agrees to on site, and what FS25 bills for a repaired
-device. It is a deliberately small stand-in for FS22's agreement workflow (no
-preview/agreement revisions): the product owner chose "technician picks parts from
-the catalog, invoice = parts + labor fee".
+The technician proposes, per device, the catalog parts they want to fit — this is
+what the customer sees and agrees to on site — and records the customer's decision
+on each proposal separately. Only an **approved** proposal on a **repaired** device
+is billable; this is the active approval/pricing system FS23 and FS25 both consume
+(see their own sections). `WorkAgreement` (FS22) is deprecated — see "On-site work
+agreement (FS22)" above.
 
 Same authorization chain as FS23 (`TECHNICIAN` role, current assignment via
 `findAssignedVisit`, device must be in `Visit.deviceIds` and on the request —
@@ -1630,45 +1622,105 @@ otherwise the uniform `404`), and the same serialization point: every write
 re-checks company + technician + status on the Visit document inside its
 transaction. Requires billing settings (`409 BILLING_NOT_CONFIGURED`).
 
+### Proposal identity
+
+Each item in `DeviceParts.items[]` has its own stable `proposalId` — deliberately
+separate from `partId` (the catalog part), because the same catalog part can be
+proposed again after a rejection. A decided proposal (`APPROVED` or `REJECTED`) is
+**never mutated**: it keeps its `proposalId`, its price snapshot and its decision
+forever. Re-proposing the same `partId` after a rejection creates a **brand-new**
+`proposalId` with a fresh catalog price snapshot — not a rewrite of the old one.
+This is what makes "a rejected proposal never becomes billable" true even after
+later scope changes (extra/changed work is always a new proposal).
+
+### Decision states
+
+`PROPOSED` (the only state a new proposal is ever created in — a client can never
+submit `decision` when proposing; unknown fields are stripped, same as any other
+client-supplied price/total), `APPROVED`, `REJECTED`. A decision is one-way:
+deciding a proposal that is not currently `PROPOSED` is rejected with
+`400 VALIDATION_ERROR` (`fieldErrors` names the bad `proposalId`). Only `APPROVED`
+proposals are billable (see "Final invoice (FS25)" below) or count toward
+`partsMinor` in this feature's own responses.
+
+**Legacy proposals:** an item created before this decision system existed has no
+`proposalId`/`decision` at all (`null` in every response, not `"PROPOSED"`) — it
+predates the concept entirely and remains billable/editable exactly as it always
+was. This is a deliberate, permanent compatibility fallback, not a migration step:
+there is no batch job that "upgrades" old data, and none is needed, because nothing
+downstream ever required it to change.
+
 ### `PUT /api/v1/technician/visits/:visitId/devices/:deviceId/parts`
 
 ```json
 { "items": [{ "partId": "...", "quantity": 1 }, { "partId": "...", "quantity": 2 }], "version": 0 }
 ```
 
-Replaces the device's whole list (`items: []` clears it; max 20 items, quantity
-1–100, each part once). Only ids and quantities are accepted — prices always come
-from the catalog; a client-supplied price/total is stripped.
+Sets the device's currently-**open** (still-`PROPOSED`) proposals (`items: []`
+clears every open proposal; max 20 items, quantity 1–100, each part once). Only ids
+and quantities are accepted — prices always come from the catalog; a client-supplied
+price/total/decision is stripped. **Already-decided proposals are never affected by
+this endpoint** — they are permanent history, kept in the stored array regardless of
+what this call sends, and only `POST .../parts/decisions` (below) can create or
+change a decision.
 
-- A part **newly added** to the device must be active in the caller's company
+- A part **newly proposed** (no prior proposal for that `partId` on this device, or
+  the prior one is already decided) must be active in the caller's company
   (otherwise `400 VALIDATION_ERROR`, `fieldErrors["items.N.partId"]`) and is
-  snapshotted at the current catalog price. A part **already on** the device keeps
-  the name/price snapshotted when it was first added — the agreed price — even if
-  the catalog price changed or the part was deactivated since.
+  snapshotted at the current catalog price, with a fresh `proposalId`.
+- A part **already open** (its latest proposal is still `PROPOSED`, or it's a
+  legacy item) is edited in place — same `proposalId` (if any), same price
+  snapshot, only the quantity changes.
 - **Availability:** every item must fit in `stockQuantity` minus the units already
   picked for *other* devices (on this visit or any other) that are still pending: the
-  visit is not `CANCELLED`, its invoice has not been issued, and that device has not
-  been recorded `FAILED`. Otherwise `409 INSUFFICIENT_STOCK` with
-  `fieldErrors["items.N.quantity"] = ["Only N available"]` and nothing is saved. So two
-  picks can never both claim the last unit and leave a completed visit with an invoice
-  that can never be issued. The device's own previous list does not count against it.
-  Picks for the same part are serialized (a `part:<id>` lock, same pattern as FS18),
-  so concurrent picks can't both pass. Stock itself is only decremented when the
-  invoice is issued.
+  visit is not `CANCELLED`, its invoice has not been issued, that device has not
+  been recorded `FAILED`, and the proposal itself has not been `REJECTED` (a
+  rejected proposal releases its reservation — it will never be fitted). Otherwise
+  `409 INSUFFICIENT_STOCK` with `fieldErrors["items.N.quantity"] = ["Only N
+  available"]` and nothing is saved. Picks for the same part are serialized (a
+  `part:<id>` lock, same pattern as FS18). Stock itself is only decremented when
+  the invoice is issued.
 - `version` has the same compare-and-set semantics as work results (0 = nothing
-  selected yet; `409 VERSION_CONFLICT` on mismatch).
+  proposed yet; `409 VERSION_CONFLICT` on mismatch).
 - Allowed while the visit is `IN_PROGRESS`, and still after it is `COMPLETED` until the
-  invoice is issued, so the technician can correct the list before invoicing
-  (`409 VISIT_STATUS_CONFLICT` for other statuses, `409 INVOICE_ALREADY_ISSUED` once
-  invoiced). Writes a `DEVICE_PARTS_UPDATED` VisitEvent.
+  invoice is issued (`409 VISIT_STATUS_CONFLICT` for other statuses,
+  `409 INVOICE_ALREADY_ISSUED` once invoiced). Writes a `DEVICE_PARTS_UPDATED`
+  VisitEvent.
 
 Response:
 
 ```json
 { "data": { "clientDeviceId": "d1", "partsMinor": 61000, "version": 1,
-  "items": [{ "partId": "...", "name": "Fan Motor", "unitPriceMinor": 45000, "quantity": 1, "lineTotalMinor": 45000 },
-            { "partId": "...", "name": "Capacitor", "unitPriceMinor": 8000, "quantity": 2, "lineTotalMinor": 16000 }] } }
+  "items": [
+    { "proposalId": "...", "partId": "...", "name": "Fan Motor", "unitPriceMinor": 45000, "quantity": 1,
+      "lineTotalMinor": 45000, "decision": "PROPOSED", "decidedAt": null },
+    { "proposalId": "...", "partId": "...", "name": "Capacitor", "unitPriceMinor": 8000, "quantity": 2,
+      "lineTotalMinor": 16000, "decision": "PROPOSED", "decidedAt": null }
+  ] } }
 ```
+
+`partsMinor` sums every item that is not `REJECTED` (legacy and `PROPOSED` items
+both still count — a rejection is the only thing that drops out of this running
+total, matching that it will never be billed either).
+
+### `POST /api/v1/technician/visits/:visitId/devices/:deviceId/parts/decisions`
+
+Records the customer's decision for one or more currently-`PROPOSED` proposals on
+this device in one call:
+
+```json
+{ "version": 1, "decisions": [
+  { "proposalId": "...", "decision": "APPROVED" },
+  { "proposalId": "...", "decision": "REJECTED" }
+] }
+```
+
+`404 NOT_FOUND` if nothing has been proposed for this device yet; `400
+VALIDATION_ERROR` if any targeted `proposalId` doesn't exist on this device or was
+already decided. This endpoint only decides existing proposals — it can never
+create, price, or re-price one. Response is the same shape as the `PUT` above.
+Writes a `DEVICE_PARTS_DECIDED` VisitEvent per decision (`workItemId` = the
+`proposalId`, `result` = the decision).
 
 ### `GET /api/v1/technician/visits/:visitId/parts`
 
@@ -1676,19 +1728,53 @@ Response:
 `Visit.deviceIds`, including devices with nothing picked (`items: []`, `version: 0`).
 Readable in any visit status.
 
+### FS23 boundary
+
+`recordWorkResult` (FS23) validates a device's `DeviceParts` before accepting a
+write, via `assertDeviceApprovedForActualWork` in `work-result.service.ts`:
+
+* **No `DeviceParts` document exists for this device, or none of its items have
+  ever had a decision (only legacy items, or none at all):** falls back to the
+  original FS18-only boundary (`Visit.deviceIds` + request scope) — this
+  preserves every visit/device created before this feature, permanently, not just
+  during a migration window.
+* **At least one decision-tracked item exists but none has been decided yet:**
+  every write is rejected with `409 WORK_NOT_APPROVED` — nothing can be recorded
+  while a decision is pending.
+* **Recording `REPAIRED`** requires at least one `APPROVED` proposal for that
+  device, else `409 WORK_NOT_APPROVED`.
+* **Recording `FAILED`** only requires the device to have been decided at all — a
+  device whose only tracked proposal was `REJECTED` can still get
+  `FAILED`/`CUSTOMER_REFUSED`.
+
+This check is necessarily **device-level** (`WorkResult` cannot represent partial
+per-part outcomes — see "Technician work execution (FS23)"): a device with one
+`APPROVED` and one `REJECTED` proposal can still be marked `REPAIRED`. The
+per-proposal correctness — the rejected proposal is never itself billed — is
+enforced separately, per line, in `billing/invoice.service.ts` (see "Final invoice
+(FS25)" > "Pricing rule").
+
 ## Final invoice (FS25)
 
 Technician-only, same authorization chain as FS23 (a visit assigned to someone else is
 the uniform `404`). Requires billing settings (`409 BILLING_NOT_CONFIGURED`).
 
-> **Dependency note:** FS24 (service report) and FS22 (agreement workflow) do not
-> exist. The invoice is priced from what does exist: FS23 work results, the
-> technician's part selections (above), and the FS10 labor fee.
+> **Dependency note:** FS24 (service report) does not exist. FS22 (agreement
+> workflow) exists but is deprecated (see "On-site work agreement (FS22)") and
+> is never read here. The invoice is priced from what's actually active: FS23
+> work results, the technician's approved part proposals (above), and the FS10
+> labor fee.
 
 ### Pricing rule (no-fix-no-fee)
 
-- A `REPAIRED` device costs its picked parts (at their snapshotted prices) plus one
-  `laborFeeMinor`.
+- A `REPAIRED` device costs its **approved** picked parts (at their snapshotted
+  prices) plus one `laborFeeMinor`. A `PROPOSED` or `REJECTED` proposal on that
+  device contributes nothing, even when another proposal on the same device is
+  approved (see "Device part proposals and decisions" > "FS23 boundary" for
+  why the underlying gate is necessarily device-level while this per-proposal
+  filter is the part that's actually precise). A legacy proposal — one with no
+  `decision` field at all, predating this feature — remains billable exactly
+  as it always was.
 - A `FAILED` device costs **zero** and lists no parts, even if parts were picked or
   work was attempted; its `result`/`failureReason` stay on the invoice.
 - `subtotalMinor` = sum of parts on billable devices, `laborMinor` = fee × repaired

@@ -43,11 +43,12 @@ apps/api/           the entire application (package.json, tsconfig, lockfile)
                        lock-based conflict prevention (FS18)
       technician/     technician-only read access to own assigned visits
                       (FS19); on-site proposed-work/customer-agreement
-                      model (FS22); start/complete visit lifecycle and
-                      per-device work results (REPAIRED/FAILED) with
-                      optimistic concurrency, gated by FS22's approved
-                      scope where one exists (FS23); per-device part
-                      selection (FS11); allowedActions
+                      model (FS22, DEPRECATED — see below); start/complete
+                      visit lifecycle and per-device work results
+                      (REPAIRED/FAILED) with optimistic concurrency,
+                      gated by FS11 DeviceParts approval where one exists
+                      (FS23); per-device part proposals + decisions
+                      (FS11); allowedActions
       health/         liveness check
     scripts/          guarded demo seed/reset CLI (FS34)
   tests/             vitest + supertest + mongodb-memory-server
@@ -159,39 +160,43 @@ Run from `apps/api/`:
 - Technician visit read access (FS19, `GET /technician/visits[/:id]`) - see
   [docs/api.md](docs/api.md). Photos/evidence are out of scope (FS13 was cancelled
   for the MVP).
-- On-site work agreement (FS22, `POST /technician/visits/:visitId/work-agreement/items`,
-  `POST /technician/visits/:visitId/work-agreement/decisions`,
-  `GET /technician/visits/:visitId/work-agreement`) - see [docs/api.md](docs/api.md)
-  "On-site work agreement (FS22)". Technician-recorded on-site agreement, not an
-  online customer approval page. Preserves Proposed Work != Approved Work: a
-  client can never submit a decision directly, and a decided item can never be
-  re-decided (scope changes are always a new proposed item). Uses its own
-  free-text/priced items, separate from FS11's parts catalog and FS23's
-  device-parts selection below — **not yet reconciled with the billing
-  pipeline, which bills off device-parts + WorkResult only; see "Current
-  limitations" in docs/api.md.**
+- On-site work agreement (FS22) is **deprecated** — see [docs/api.md](docs/api.md)
+  "On-site work agreement (FS22)". Its routes remain mounted for backward
+  compatibility but have no effect on FS23 or FS25. The decision workflow it
+  pioneered (`PROPOSED` -> `APPROVED`/`REJECTED`, one-way, immutable once
+  decided) now lives directly on FS11's `DeviceParts` (below), which is
+  catalog-backed and already wired into stock and invoicing.
+- Device part proposals and decisions (FS11,
+  `PUT /technician/visits/:visitId/devices/:deviceId/parts`,
+  `POST /technician/visits/:visitId/devices/:deviceId/parts/decisions`,
+  `GET /technician/visits/:visitId/parts`) - see [docs/api.md](docs/api.md)
+  "Device part proposals and decisions". Each proposal has its own stable
+  `proposalId` (never just the catalog `partId`, since the same part can be
+  re-proposed after a rejection); a client can never submit a decision
+  directly; a decided proposal is immutable. Legacy proposals from before this
+  decision field existed (no `decision` at all) remain billable/editable
+  exactly as before — a permanent compatibility fallback, not a migration step.
 - Technician work execution (FS23, `POST /technician/visits/:id/start`,
   `POST /technician/visits/:id/complete`,
   `PUT /technician/visits/:visitId/work-results/:deviceId`,
   `GET /technician/visits/:visitId/work-results`) - see [docs/api.md](docs/api.md).
-  Recording `REPAIRED`/`FAILED` is now gated by FS22's approved scope wherever a
-  work agreement exists for a device (`409 WORK_NOT_APPROVED` otherwise); a
-  device FS22 hasn't been used on yet falls back to the original interim
-  boundary (`Visit.deviceIds`, the admin-assigned scope from FS18) — a
-  deliberate compatibility gap, documented in docs/api.md "Current
-  limitations", not full enforcement. Visit completion still requires every
-  device in `Visit.deviceIds` to have a result (unchanged by FS22). Payment,
-  invoicing, and reassignment endpoints remain out of scope for FS23 itself.
-- Billing (FS10 company settings/labor fee, FS11 parts catalog with stock,
-  technician part selection via `device-parts`, FS25 invoices) — see
-  [docs/api.md](docs/api.md). FS11 deliberately tracks stock counts (a product
-  decision that departs from the ticket's availability flag); issuing an
-  invoice decrements stock. Billing is computed from `device-parts` +
-  `WorkResult` only — it does **not** consult FS22's `work-agreement` approval
-  state, so a part can currently be picked and billed without a recorded
-  customer decision on it. This is an open reconciliation between FS22 and
-  FS11/FS25, not by design; see docs/api.md "Current limitations". Payments
-  (FS26) and the customer invoice view (FS27) are not implemented.
+  Recording `REPAIRED`/`FAILED` is gated by FS11 `DeviceParts` decisions wherever
+  any exist for a device (`409 WORK_NOT_APPROVED` otherwise); a device with no
+  decision-tracked proposals falls back to the original interim boundary
+  (`Visit.deviceIds`, the admin-assigned scope from FS18) — a permanent
+  compatibility fallback for legacy data, not full enforcement. Visit
+  completion still requires every device in `Visit.deviceIds` to have a result.
+  Payment, invoicing, and reassignment endpoints remain out of scope for FS23
+  itself.
+- Billing (FS10 company settings/labor fee, FS11 parts catalog with stock and
+  approval decisions, FS25 invoices) — see [docs/api.md](docs/api.md). FS11
+  deliberately tracks stock counts (a product decision that departs from the
+  ticket's availability flag); issuing an invoice decrements stock. Billing is
+  computed from `DeviceParts` + `WorkResult`: a `REPAIRED` device's parts are
+  only billed when their own proposal is `APPROVED` — a `PROPOSED`/`REJECTED`
+  proposal on that device is never billed, even when another proposal on the
+  same device is approved. Payments (FS26) and the customer invoice view
+  (FS27) are not implemented.
 - Synthetic demo data (FS34, `pnpm seed:demo`) — see [docs/demo.md](docs/demo.md).
 - Technician accounts (FS09): admins create them and get a one-time activation
   token to share (there is no email service yet, FS07); the technician sets their
