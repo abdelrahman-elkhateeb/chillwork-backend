@@ -8,7 +8,7 @@ import {
   postCompleteVisit,
   postStartVisit,
 } from "./technician-visit.controller.js";
-import { getParts, putDeviceParts } from "./device-parts.controller.js";
+import { getParts, postRecordPartDecisions, putDeviceParts } from "./device-parts.controller.js";
 import { getWorkResults, putWorkResult } from "./work-result.controller.js";
 import { getWorkAgreementHandler, postProposeWorkItems, postRecordDecisions } from "./work-agreement.controller.js";
 
@@ -20,6 +20,10 @@ const technician = [authenticate, requireRole("TECHNICIAN")] as const;
 technicianRouter.get("/technician/visits", ...technician, getTechnicianVisits);
 technicianRouter.get("/technician/visits/:id", ...technician, getTechnicianVisit);
 technicianRouter.get("/technician/visits/:visitId/work-results", ...technician, getWorkResults);
+// DEPRECATED (see work-agreement.service.ts): kept mounted for backward
+// compatibility with any existing caller, but no longer consulted by
+// FS23 or FS25 — DeviceParts (below) is now the sole approval/pricing
+// source. See docs/api.md "Device part proposals and decisions".
 technicianRouter.get("/technician/visits/:visitId/work-agreement", ...technician, getWorkAgreementHandler);
 technicianRouter.get("/technician/visits/:visitId/parts", ...technician, getParts);
 
@@ -31,14 +35,7 @@ technicianRouter.post("/technician/visits/:id/start", csrfOriginGuard, ...techni
 technicianRouter.post("/technician/visits/:id/complete", csrfOriginGuard, ...technician, postCompleteVisit);
 technicianRouter.put("/technician/visits/:visitId/work-results/:deviceId", csrfOriginGuard, ...technician, putWorkResult);
 
-// Mutations (FS22): proposed work items and the customer's recorded
-// decision on them — the approved-scope source of truth FS23 (above)
-// validates against. See work-agreement.service.ts.
-//
-// NOTE: this currently runs in parallel with FS22/FS11's device-parts
-// selection below, which billing/invoice.service.ts actually consumes.
-// The two are not yet reconciled — see docs/api.md "On-site work
-// agreement (FS22)" > "Current limitations".
+// DEPRECATED mutations (see the GET note above) — same reasoning.
 technicianRouter.post(
   "/technician/visits/:visitId/work-agreement/items",
   csrfOriginGuard,
@@ -52,9 +49,18 @@ technicianRouter.post(
   postRecordDecisions
 );
 
+// DeviceParts (FS11): the active proposal + customer-decision source that
+// FS23 (assertDeviceApprovedForActualWork) and FS25 (buildInvoiceDraft)
+// both validate against. See device-parts.service.ts.
 technicianRouter.put(
   "/technician/visits/:visitId/devices/:deviceId/parts",
   csrfOriginGuard,
   ...technician,
   putDeviceParts
+);
+technicianRouter.post(
+  "/technician/visits/:visitId/devices/:deviceId/parts/decisions",
+  csrfOriginGuard,
+  ...technician,
+  postRecordPartDecisions
 );

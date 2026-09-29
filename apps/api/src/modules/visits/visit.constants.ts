@@ -35,11 +35,16 @@ export const VISIT_EVENT_TYPES = [
   "VISIT_COMPLETED",
   "WORK_RESULT_RECORDED",
   "WORK_RESULT_UPDATED",
-  // FS22 (on-site work agreement / approved scope):
+  // FS22 (on-site work agreement / approved scope) — DEPRECATED, see
+  // technician/work-agreement.service.ts; no longer written by any active
+  // code path, kept so historical events remain readable.
   "WORK_ITEM_PROPOSED",
   "WORK_ITEM_DECIDED",
-  // Technician part selection and invoicing (FS11/FS25):
+  // Technician part selection and invoicing (FS11/FS25). DEVICE_PARTS_DECIDED
+  // is the active approval-decision event (see device-parts.service.ts),
+  // replacing WORK_ITEM_DECIDED above.
   "DEVICE_PARTS_UPDATED",
+  "DEVICE_PARTS_DECIDED",
   "INVOICE_ISSUED",
 ] as const;
 export type VisitEventType = (typeof VISIT_EVENT_TYPES)[number];
