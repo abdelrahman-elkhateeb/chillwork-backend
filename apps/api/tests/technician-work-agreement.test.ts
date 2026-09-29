@@ -5,7 +5,6 @@ import { createApp } from "../src/app.js";
 import { VisitEvent } from "../src/modules/visits/visit-event.model.js";
 import { Visit } from "../src/modules/visits/visit.model.js";
 import { WorkAgreement } from "../src/modules/technician/work-agreement.model.js";
-import { WorkResult } from "../src/modules/technician/work-result.model.js";
 import {
   cookieHeader,
   createCompany,
@@ -66,15 +65,6 @@ function getAgreement(cookies: Record<string, string>, visitId: unknown) {
   return request(app)
     .get(`/api/v1/technician/visits/${String(visitId)}/work-agreement`)
     .set("Cookie", cookieHeader(cookies));
-}
-
-function putWorkResult(cookies: Record<string, string>, visitId: unknown, deviceId: string, body: Record<string, unknown>) {
-  return request(app)
-    .put(`/api/v1/technician/visits/${String(visitId)}/work-results/${deviceId}`)
-    .set("Origin", "http://localhost:3000")
-    .set("Host", "localhost:3000")
-    .set("Cookie", cookieHeader(cookies))
-    .send(body);
 }
 
 const compressorItem = { clientDeviceId: "d1", category: "PART_REPLACEMENT", description: "Replace compressor", partIdentifier: "COMP-9", quantity: 1, unitPriceMinor: 4500 };
@@ -333,82 +323,16 @@ describe("tenant isolation and authorization", () => {
   });
 });
 
-describe("FS22 -> FS23 boundary", () => {
-  it("approved work can be recorded as REPAIRED by FS23", async () => {
-    const w = await world();
-    const v = await visitFor(w, w.techA.user._id, { status: "IN_PROGRESS", deviceIds: ["d1"] });
-    const proposed = await proposeItems(w.techA.cookies, v._id, { version: 0, items: [compressorItem] });
-    const itemId = proposed.body.data.items[0].itemId;
-    await decide(w.techA.cookies, v._id, { version: 1, decisions: [{ itemId, decision: "APPROVED" }] });
-
-    const res = await putWorkResult(w.techA.cookies, v._id, "d1", { result: "REPAIRED", version: 0 });
-    expect(res.status).toBe(200);
-  });
-
-  it("rejects REPAIRED for a device whose only decision is REJECTED", async () => {
-    const w = await world();
-    const v = await visitFor(w, w.techA.user._id, { status: "IN_PROGRESS", deviceIds: ["d1"] });
-    const proposed = await proposeItems(w.techA.cookies, v._id, { version: 0, items: [compressorItem] });
-    const itemId = proposed.body.data.items[0].itemId;
-    await decide(w.techA.cookies, v._id, { version: 1, decisions: [{ itemId, decision: "REJECTED" }] });
-
-    const res = await putWorkResult(w.techA.cookies, v._id, "d1", { result: "REPAIRED", version: 0 });
-    expect(res.status).toBe(409);
-    expect(res.body.error.code).toBe("WORK_NOT_APPROVED");
-    expect(await WorkResult.countDocuments({})).toBe(0);
-  });
-
-  it("allows FAILED/CUSTOMER_REFUSED for a device whose only decision is REJECTED", async () => {
-    const w = await world();
-    const v = await visitFor(w, w.techA.user._id, { status: "IN_PROGRESS", deviceIds: ["d1"] });
-    const proposed = await proposeItems(w.techA.cookies, v._id, { version: 0, items: [compressorItem] });
-    const itemId = proposed.body.data.items[0].itemId;
-    await decide(w.techA.cookies, v._id, { version: 1, decisions: [{ itemId, decision: "REJECTED" }] });
-
-    const res = await putWorkResult(w.techA.cookies, v._id, "d1", {
-      result: "FAILED",
-      failureReason: "CUSTOMER_REFUSED",
-      version: 0,
-    });
-    expect(res.status).toBe(200);
-  });
-
-  it("rejects any work result while the device's only proposal is still undecided", async () => {
-    const w = await world();
-    const v = await visitFor(w, w.techA.user._id, { status: "IN_PROGRESS", deviceIds: ["d1"] });
-    await proposeItems(w.techA.cookies, v._id, { version: 0, items: [compressorItem] }); // still PROPOSED
-
-    const res = await putWorkResult(w.techA.cookies, v._id, "d1", { result: "REPAIRED", version: 0 });
-    expect(res.status).toBe(409);
-    expect(res.body.error.code).toBe("WORK_NOT_APPROVED");
-  });
-
-  it("falls back to the FS18 device-scope-only boundary when no agreement exists for the device at all", async () => {
-    const w = await world();
-    const v = await visitFor(w, w.techA.user._id, { status: "IN_PROGRESS", deviceIds: ["d1"] });
-    // No WorkAgreement created for this visit at all.
-    const res = await putWorkResult(w.techA.cookies, v._id, "d1", { result: "REPAIRED", version: 0 });
-    expect(res.status).toBe(200);
-  });
-
-  it("an agreement in one company/visit does not unlock a same-named device in another", async () => {
-    const w = await world();
-    const other = await world();
-    const v1 = await visitFor(w, w.techA.user._id, { status: "IN_PROGRESS", deviceIds: ["d1"] });
-    const v2 = await visitFor(other, other.techA.user._id, { status: "IN_PROGRESS", deviceIds: ["d1"] });
-
-    const proposed = await proposeItems(w.techA.cookies, v1._id, { version: 0, items: [compressorItem] });
-    const itemId = proposed.body.data.items[0].itemId;
-    await decide(w.techA.cookies, v1._id, { version: 1, decisions: [{ itemId, decision: "APPROVED" }] });
-
-    // v2 has no agreement at all -> falls back to the FS18-only boundary, so
-    // this still succeeds — but it is v2's own (nonexistent) agreement that
-    // was consulted, never v1's.
-    const res = await putWorkResult(other.techA.cookies, v2._id, "d1", { result: "REPAIRED", version: 0 });
-    expect(res.status).toBe(200);
-    expect(await WorkAgreement.countDocuments({ visitId: v2._id })).toBe(0);
-  });
-});
+// FS22 -> FS23 boundary tests lived here previously. WorkAgreement is now
+// deprecated (see work-agreement.service.ts): FS23's actual-work gate and
+// FS25's billing eligibility were both repointed to FS11's DeviceParts
+// (technician/device-parts.model.ts), which owns catalog-part proposals,
+// approval decisions and accepted price snapshots going forward. The
+// equivalent boundary tests now live in tests/technician-device-parts.test.ts
+// ("FS23 -> FS11 boundary" describe block) and tests/invoices.test.ts
+// ("billing eligibility by device-part decision"). WorkAgreement's own
+// internal behavior (this file's other describe blocks) is unaffected and
+// still fully functional — it is simply no longer consulted downstream.
 
 describe("concurrency", () => {
   it("does not let two concurrent proposals against the same new agreement both succeed", async () => {

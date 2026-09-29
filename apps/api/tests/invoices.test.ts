@@ -6,6 +6,7 @@ import { Invoice } from "../src/modules/billing/invoice.model.js";
 import { PartStockMovement } from "../src/modules/catalog/part-stock-movement.model.js";
 import { Part } from "../src/modules/catalog/part.model.js";
 import { Company } from "../src/modules/companies/company.model.js";
+import { DeviceParts } from "../src/modules/technician/device-parts.model.js";
 import { VisitEvent } from "../src/modules/visits/visit-event.model.js";
 import { Visit } from "../src/modules/visits/visit.model.js";
 import {
@@ -66,6 +67,29 @@ async function pickParts(w: World, deviceId: string, items: Array<{ partId: unkn
     version: 0,
   });
   expect(res.status).toBe(200);
+  return res.body.data as { items: Array<{ proposalId: string; decision: string }>; version: number };
+}
+
+/** Decides every currently-PROPOSED proposal on the device the same way. */
+async function decideOpenProposals(w: World, deviceId: string, decision: "APPROVED" | "REJECTED") {
+  const current = await getParts(w.tech.cookies, w.visit._id);
+  const device = current.body.data.devices.find((d: { clientDeviceId: string }) => d.clientDeviceId === deviceId);
+  const open = device.items.filter((item: { decision: string }) => item.decision === "PROPOSED");
+  if (open.length === 0) return;
+  const res = await send(
+    w.tech.cookies,
+    "post",
+    `/api/v1/technician/visits/${String(w.visit._id)}/devices/${deviceId}/parts/decisions`,
+    {
+      version: device.version,
+      decisions: open.map((item: { proposalId: string }) => ({ proposalId: item.proposalId, decision })),
+    }
+  );
+  expect(res.status).toBe(200);
+}
+
+function getParts(cookies: Record<string, string>, visitId: unknown) {
+  return request(app).get(`/api/v1/technician/visits/${String(visitId)}/parts`).set("Cookie", cookieHeader(cookies));
 }
 
 async function record(w: World, deviceId: string, result: "REPAIRED" | "FAILED") {
@@ -100,7 +124,9 @@ async function twoOfThreeRepaired(w: World) {
     { partId: w.motor._id, quantity: 1 },
     { partId: w.cap._id, quantity: 2 },
   ]);
+  await decideOpenProposals(w, "d1", "APPROVED");
   await pickParts(w, "d3", [{ partId: w.motor._id, quantity: 1 }]);
+  await decideOpenProposals(w, "d3", "APPROVED");
   await record(w, "d1", "REPAIRED");
   await record(w, "d2", "REPAIRED");
   await record(w, "d3", "FAILED");
@@ -188,6 +214,7 @@ describe("POST /technician/visits/:id/invoice", () => {
   it("closes an all-failed visit at zero with no payment required", async () => {
     const w = await world(["d1", "d2"]);
     await pickParts(w, "d1", [{ partId: w.motor._id, quantity: 1 }]);
+    await decideOpenProposals(w, "d1", "REJECTED");
     await record(w, "d1", "FAILED");
     await record(w, "d2", "FAILED");
     await complete(w);
@@ -294,10 +321,96 @@ describe("POST /technician/visits/:id/invoice", () => {
   });
 });
 
+describe("billing eligibility by device-part decision", () => {
+  it("bills an APPROVED proposal on a repaired device", async () => {
+    const w = await world(["d1"]);
+    await pickParts(w, "d1", [{ partId: w.motor._id, quantity: 1 }]);
+    await decideOpenProposals(w, "d1", "APPROVED");
+    await record(w, "d1", "REPAIRED");
+    await complete(w);
+
+    const res = await issue(w.tech.cookies, w.visit._id);
+    expect(res.status).toBe(201);
+    expect(res.body.data.totalMinor).toBe(45000 + FEE);
+  });
+
+  it("mixed proposals on one device: rejected part is never billed even though another part on the same device is approved", async () => {
+    const w = await world(["d1"]);
+    const picked = await pickParts(w, "d1", [
+      { partId: w.motor._id, quantity: 1 },
+      { partId: w.cap._id, quantity: 1 },
+    ]);
+    const [motorItem, capItem] = picked.items;
+    const decideRes = await send(
+      w.tech.cookies,
+      "post",
+      `/api/v1/technician/visits/${String(w.visit._id)}/devices/d1/parts/decisions`,
+      {
+        version: picked.version,
+        decisions: [
+          { proposalId: motorItem!.proposalId, decision: "APPROVED" },
+          { proposalId: capItem!.proposalId, decision: "REJECTED" },
+        ],
+      }
+    );
+    expect(decideRes.status).toBe(200);
+
+    await record(w, "d1", "REPAIRED");
+    await complete(w);
+
+    const res = await issue(w.tech.cookies, w.visit._id);
+    expect(res.status).toBe(201);
+    // Only the approved motor is billed; the rejected capacitor contributes nothing,
+    // even though it sits on the same REPAIRED device.
+    expect(res.body.data.devices[0].parts.map((p: { name: string }) => p.name)).toEqual(["Fan Motor"]);
+    expect(res.body.data.subtotalMinor).toBe(45000);
+    expect(res.body.data.totalMinor).toBe(45000 + FEE);
+  });
+
+  it("a still-PROPOSED (undecided) proposal blocks recording REPAIRED at all", async () => {
+    const w = await world(["d1"]);
+    await pickParts(w, "d1", [{ partId: w.motor._id, quantity: 1 }]);
+    const res = await send(w.tech.cookies, "put", `/api/v1/technician/visits/${String(w.visit._id)}/work-results/d1`, {
+      result: "REPAIRED",
+      version: 0,
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("WORK_NOT_APPROVED");
+  });
+
+  it("legacy DeviceParts documents with no decision field remain billable exactly as before", async () => {
+    const w = await world(["d1"]);
+    // Bypass the API to simulate a document created before decisions existed:
+    // no `decision`/`proposalId` on its items at all (not even null).
+    await DeviceParts.create({
+      companyId: w.company._id,
+      visitId: w.visit._id,
+      requestId: w.req._id,
+      clientDeviceId: "d1",
+      currency: "EGP",
+      items: [{ partId: w.motor._id, name: "Fan Motor", unitPriceMinor: 45000, quantity: 1 }],
+      version: 1,
+      updatedById: w.tech.user._id,
+    });
+
+    const res = await send(w.tech.cookies, "put", `/api/v1/technician/visits/${String(w.visit._id)}/work-results/d1`, {
+      result: "REPAIRED",
+      version: 0,
+    });
+    expect(res.status).toBe(200); // no decision-bearing item exists yet -> falls back to unrestricted
+    await complete(w);
+
+    const issued = await issue(w.tech.cookies, w.visit._id);
+    expect(issued.status).toBe(201);
+    expect(issued.body.data.totalMinor).toBe(45000 + FEE);
+  });
+});
+
 describe("GET /technician/visits/:id/invoice-preview", () => {
   it("prices the current state while IN_PROGRESS, leaving unresolved devices at zero", async () => {
     const w = await world(["d1", "d2"]);
     await pickParts(w, "d1", [{ partId: w.cap._id, quantity: 1 }]);
+    await decideOpenProposals(w, "d1", "APPROVED");
     await record(w, "d1", "REPAIRED");
 
     const res = await preview(w.tech.cookies, w.visit._id);
