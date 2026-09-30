@@ -587,7 +587,10 @@ number.
 (`POST https://generativelanguage.googleapis.com/v1beta/interactions`,
 `x-goog-api-key` header, structured JSON output via
 `response_format.mime_type: "application/json"` + a JSON Schema), also
-verified against the same official docs on 2026-09-24. This superseded
+verified against the same official docs on 2026-09-24. The generated
+text is read from `steps[type="model_output"].content[type="text"].text`
+— the `output_text` shown in Google's docs is an SDK-only convenience
+property and is not present in the REST response. This superseded
 the older `models/{model}:generateContent` contract at some point after
 this repository's dependencies were last reviewed.
 

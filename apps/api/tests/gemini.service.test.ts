@@ -5,8 +5,17 @@ import { MAX_LIST_ITEMS, MAX_SUMMARY_LENGTH } from "../src/modules/ai/gemini.con
 import { analyzeDevices } from "../src/modules/ai/gemini.service.js";
 import type { DeviceInput } from "../src/modules/ai/gemini.schemas.js";
 
+// Mirrors the real Interactions API wire shape, including a `thought`
+// step the client must ignore.
 function geminiHttpResponse(outputText: string, status = 200): Response {
-  return new Response(JSON.stringify({ interaction: { output_text: outputText } }), { status });
+  const body = {
+    status: "completed",
+    steps: [
+      { type: "thought", content: [{ type: "text", text: "not the answer" }] },
+      { type: "model_output", content: [{ type: "text", text: outputText }] },
+    ],
+  };
+  return new Response(JSON.stringify(body), { status });
 }
 
 function validOutputFor(devices: Pick<DeviceInput, "clientDeviceId">[]) {
@@ -118,6 +127,18 @@ describe("analyzeDevices — invalid provider output", () => {
   it("returns a controlled FAILED result for malformed JSON, with no invented analysis", async () => {
     const devices: DeviceInput[] = [{ clientDeviceId: "dev-1", originalDescription: "desc" }];
     mockFetchResolving(geminiHttpResponse("{not valid json"));
+
+    const result = await analyzeDevices({ devices });
+
+    expect(result.devices[0]?.metadata.status).toBe("FAILED");
+    expect(result.devices[0]?.metadata.errorCode).toBe("GEMINI_INVALID_OUTPUT");
+    expect(result.devices[0]?.analysis).toBeNull();
+  });
+
+  it("returns FAILED when the response has no model_output step", async () => {
+    const devices: DeviceInput[] = [{ clientDeviceId: "dev-1", originalDescription: "desc" }];
+    const body = { status: "completed", steps: [{ type: "thought", content: [{ type: "text", text: "{}" }] }] };
+    mockFetchResolving(new Response(JSON.stringify(body), { status: 200 }));
 
     const result = await analyzeDevices({ devices });
 

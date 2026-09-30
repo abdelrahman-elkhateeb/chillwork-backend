@@ -59,7 +59,8 @@ function postRequests(
 }
 
 function geminiHttpResponse(outputText: string, status = 200): Response {
-  return new Response(JSON.stringify({ interaction: { output_text: outputText } }), { status });
+  const body = { status: "completed", steps: [{ type: "model_output", content: [{ type: "text", text: outputText }] }] };
+  return new Response(JSON.stringify(body), { status });
 }
 
 function validOutputFor(devices: Array<{ clientDeviceId: string }>) {

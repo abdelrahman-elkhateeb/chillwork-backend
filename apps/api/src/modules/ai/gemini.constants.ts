@@ -16,6 +16,14 @@
 export const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
 /**
+ * The default ("medium") thinking regularly blew past the request timeout.
+ * An initial triage summary doesn't need deep reasoning, and "low" is
+ * supported by every current Flash model, so switching GEMINI_MODEL never
+ * turns this into a 400.
+ */
+export const GEMINI_THINKING_LEVEL = "low";
+
+/**
  * Bumping this is how a deliberate prompt change is tracked in result
  * metadata — never derived from a timestamp, so two results only share a
  * promptVersion when they were actually produced by the same prompt text.

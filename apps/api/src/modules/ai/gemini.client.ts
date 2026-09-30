@@ -1,5 +1,5 @@
 import { env } from "../../config/env.js";
-import { GEMINI_API_BASE_URL } from "./gemini.constants.js";
+import { GEMINI_API_BASE_URL, GEMINI_THINKING_LEVEL } from "./gemini.constants.js";
 import { geminiWireEnvelopeSchema } from "./gemini.schemas.js";
 
 /**
@@ -47,6 +47,7 @@ export async function callGemini(prompt: string, responseJsonSchema: unknown): P
       body: JSON.stringify({
         model: env.GEMINI_MODEL,
         input: prompt,
+        generation_config: { thinking_level: GEMINI_THINKING_LEVEL },
         response_format: {
           type: "text",
           mime_type: "application/json",
@@ -78,7 +79,17 @@ export async function callGemini(prompt: string, responseJsonSchema: unknown): P
       return { ok: false, errorCode: "GEMINI_INVALID_OUTPUT" };
     }
 
-    return { ok: true, rawText: envelope.data.interaction.output_text };
+    const rawText = envelope.data.steps
+      .filter((step) => step.type === "model_output")
+      .flatMap((step) => step.content ?? [])
+      .filter((part) => part.type === "text")
+      .map((part) => part.text ?? "")
+      .join("");
+    if (!rawText) {
+      return { ok: false, errorCode: "GEMINI_INVALID_OUTPUT" };
+    }
+
+    return { ok: true, rawText };
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       return { ok: false, errorCode: "GEMINI_TIMEOUT" };

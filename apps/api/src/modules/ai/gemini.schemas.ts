@@ -141,9 +141,17 @@ export const GEMINI_RESPONSE_JSON_SCHEMA = {
   required: ["devices"],
 } as const;
 
-/** The outer HTTP response envelope for the Interactions API. */
+/**
+ * The outer HTTP response envelope for the Interactions API. There is no
+ * `output_text` on the wire — that's a convenience property the official
+ * SDKs compute. The answer lives in the `model_output` step(s); other
+ * steps (e.g. `thought`) are ignored by the client.
+ */
 export const geminiWireEnvelopeSchema = z.object({
-  interaction: z.object({
-    output_text: z.string(),
-  }),
+  steps: z.array(
+    z.object({
+      type: z.string(),
+      content: z.array(z.object({ type: z.string(), text: z.string().optional() })).optional(),
+    })
+  ),
 });
