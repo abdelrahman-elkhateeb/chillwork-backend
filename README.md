@@ -1,207 +1,186 @@
-# fs-api
+# ChillWork — Backend API
 
-Backend API for the Field Service SaaS project. A standalone Express
-application (not a monorepo/workspace) living in [apps/api/](apps/api/).
+**Job management for AC, refrigeration and appliance repair companies.**
 
-## Stack
+This is the API behind ChillWork. It runs a repair job from the customer's first
+message to the final invoice: intake, AI triage, conflict-free scheduling,
+on-site part approval, per-unit results and billing. The customer site and the
+admin/technician dashboard live in
+[chillwork-frontend](https://github.com/abdelrahman-elkhateeb/chillwork-frontend).
 
-- Node.js 24, TypeScript (ESM, NodeNext module resolution)
+---
+
+## What it does
+
+### Three roles, enforced on the server
+
+| Role | Can |
+| --- | --- |
+| **Customer** | Register, submit a request covering several units, follow its progress and timeline, and see the invoice summary. |
+| **Admin** | Triage requests (with the AI reading), book visits, invite and manage technicians, manage the parts catalog and stock, and set the currency and labor fee. |
+| **Technician** | See only the visits assigned to them, start and complete a visit, propose parts per unit, record the customer's decisions and each unit's result, and issue the invoice. |
+
+Every record belongs to a company, and every query is scoped to the signed-in
+user's company and role. Another company's record looks exactly like a missing one (`404`).
+
+### The job, step by step
+
+1. **Request.** A customer submits one request for several units, each described
+   in their own words. Submitting is idempotent: a retried request never
+   creates a duplicate.
+2. **AI triage.** Before the request is stored, Google Gemini reads each unit and
+   returns a short summary, possible causes, missing information and questions
+   to ask on site. The customer's original text is never changed or replaced. If
+   the AI fails or times out, the request is still saved. The analysis is
+   visible to staff only, never to customers.
+3. **Scheduling.** The admin books a visit for a technician. Overlapping visits
+   are refused, even when two admins book at the same moment.
+4. **Part approval.** The technician proposes catalog parts per unit. The customer
+   approves or rejects each proposal. A decision is final, and a rejected part
+   can only come back as a new proposal.
+5. **Results.** Each unit is marked `REPAIRED`, or `FAILED` with a structured
+   reason (part unavailable, customer refused, too expensive, technical issue,
+   other). A visit can't be completed until every unit has a result.
+6. **Invoice.** It's built from what was actually done and approved.
+
+### Billing rules
+
+- **No fix, no fee:** a repaired unit costs its approved parts plus one labor
+  fee. A failed unit costs zero.
+- Part prices are snapshotted when proposed, so later catalog changes never
+  rewrite an open job.
+- The company currency locks once set. Changes to the labor fee and currency
+  are audited.
+- Issuing an invoice decrements stock, and every stock movement (initial,
+  adjustment, invoice) is written to a ledger with who did it and why.
+- All money is stored as integer minor units. Nothing is ever rounded.
+
+### Security
+
+- Cookie-based sessions: short-lived access JWTs and rotating refresh tokens,
+  all `HttpOnly`. If a stolen refresh token is replayed, the session is revoked.
+- CSRF/origin checks on every state-changing route.
+- Login, registration, request creation and the AI call are rate limited.
+- Technicians activate their accounts with a one-time, 7-day invite link and
+  choose their own password. Admins never see it.
+- Logs never include secrets, tokens, cookies or request bodies.
+
+---
+
+## Tech stack
+
+- Node.js 24, TypeScript (ESM)
 - Express 5
-- Mongoose (MongoDB)
-- Zod for env and request validation
-- pnpm as package manager
-- `tsx` for local development
-
-## Project structure
+- MongoDB with Mongoose (multi-document transactions)
+- Zod for environment and request validation
+- Google Gemini for device analysis
+- Vitest + Supertest + mongodb-memory-server for tests
 
 ```
-apps/api/           the entire application (package.json, tsconfig, lockfile)
+apps/api/
   src/
-    app.ts           builds & exports the Express app (no listen())
-    server.ts        imports app.ts and calls listen() for local dev
-    config/          env validation
-    db/              cached Mongoose connection
-    middleware/      request id, 404, centralized error handler, require-db,
-                      authenticate (server-side session validation), csrf-origin
-    lib/             HttpError, response envelope, Idempotency-Key helpers
+    app.ts          builds the Express app (no listen(), so it can run serverless)
+    server.ts       local entry point
+    config/         environment validation
+    middleware/     request id, auth, CSRF/origin guard, errors
     modules/
-      auth/          login/refresh/logout, Session model, JWT + refresh
-                      token primitives, MongoDB-backed login throttling
-      users/          User model, password hashing
-      companies/      Company model; admin company settings + labor fee (FS10)
-      catalog/        parts catalog, admin part management and stock
-                       ledger (FS11)
-      billing/        final invoice preview/issuance (FS25)
-      ai/             Gemini device analysis service (analyzeDevices()) —
-                       internal only, no HTTP route; see docs/api.md
-      requests/       POST /requests — validated multi-device service
-                       request creation, idempotency, FS14 integration;
-                       admin request list/detail (FS17)
-      staff/          admin technician management + link-based activation
-                       (FS09)
-      visits/         admin visit scheduling + technician availability,
-                       lock-based conflict prevention (FS18)
-      technician/     technician-only read access to own assigned visits
-                      (FS19); on-site proposed-work/customer-agreement
-                      model (FS22, DEPRECATED — see below); start/complete
-                      visit lifecycle and per-device work results
-                      (REPAIRED/FAILED) with optimistic concurrency,
-                      gated by FS11 DeviceParts approval where one exists
-                      (FS23); per-device part proposals + decisions
-                      (FS11); allowedActions
-      health/         liveness check
-    scripts/          guarded demo seed/reset CLI (FS34)
-  tests/             vitest + supertest + mongodb-memory-server
-docs/                API and architecture documentation
+      auth/         login, refresh, logout, sessions, throttling
+      users/        users and password hashing
+      companies/    company settings, currency and labor fee
+      requests/     customer requests, admin triage, timeline
+      ai/           Gemini analysis (internal service, no public route)
+      visits/       scheduling and technician availability
+      technician/   assigned visits, part proposals, work results
+      catalog/      parts catalog, stock and stock ledger
+      billing/      invoice preview and issuance
+      staff/        technician management and activation
+      health/       liveness check
+    scripts/        demo seed/reset
+  tests/
+docs/
+  api.md            full API reference
+  demo.md           demo data and walkthrough
 ```
 
-See [docs/api.md](docs/api.md) for the response envelope, pagination, and
-request-ID conventions all endpoints follow.
+---
 
-## Setup
+## Running it locally
+
+Requires **Node 24+** and a MongoDB database. A MongoDB Atlas free cluster
+works.
 
 ```bash
 cd apps/api
-pnpm install
-cp .env.example .env
-# edit .env and set a real MONGODB_URI
+npm install
+cp .env.example .env    # then fill in MONGODB_URI and JWT_ACCESS_SECRET
+npm run dev
 ```
 
-## Environment variables
-
-| Variable       | Required | Default       | Notes                                   |
-| -------------- | -------- | ------------- | ---------------------------------------- |
-| `NODE_ENV`     | no       | `development` | one of `development`, `test`, `production` |
-| `PORT`         | no       | `3000`        | port the HTTP server listens on          |
-| `MONGODB_URI`  | yes      | —             | MongoDB connection string (e.g. Atlas)   |
-| `JWT_ACCESS_SECRET` | yes | —             | signs/verifies access JWTs, >= 32 chars  |
-| `JWT_ISSUER`   | no       | `fs-api`      | access JWT `iss` claim                   |
-| `JWT_AUDIENCE` | no       | `fs-api-clients` | access JWT `aud` claim                |
-| `AUTH_COOKIE_SECURE` | no | `true` in production, else `false` | `Secure` flag on auth cookies |
-| `AUTH_COOKIE_SAME_SITE` | no | `lax`      | `SameSite` flag on auth cookies          |
-| `AUTH_ALLOWED_ORIGINS` | no | (empty)     | extra comma-separated origins allowed for CSRF/origin checks, beyond the request's own same-origin |
-| `AUTH_REFRESH_GRACE_MS` | no | `10000`    | refresh-token rotation grace window, ms  |
-| `AUTH_LOGIN_MAX_ATTEMPTS_PER_ACCOUNT` | no | `5` | login throttle, per account+IP     |
-| `AUTH_LOGIN_MAX_ATTEMPTS_PER_IP` | no | `20`     | login throttle, per IP                   |
-| `AUTH_LOGIN_WINDOW_MS` | no | `900000`        | login throttle window, ms (15 min)       |
-| `DEMO_COMPANY_ID` | no* | —          | the single company registration assigns users to; *registration (`POST /auth/register`) fails with 503 until this is set to a real, active Company `_id` |
-| `AUTH_REGISTER_MAX_ATTEMPTS_PER_IP` | no | `10` | registration throttle, per IP            |
-| `AUTH_REGISTER_WINDOW_MS` | no | `3600000` | registration throttle window, ms (1 hour) |
-| `GEMINI_API_KEY` | no* | —          | *no analysis can succeed without it, but the app still starts and everything else still works if unset — see docs/api.md "AI device analysis (FS14)" |
-| `GEMINI_MODEL` | no | `gemini-3.8-flash` | single fixed model, no fallback |
-| `GEMINI_TIMEOUT_MS` | no | `15000` | bounded timeout for the Gemini call, ms |
-| `GEMINI_RATE_LIMIT_MAX_ATTEMPTS` | no | `5` | Gemini throttle, single global bucket |
-| `GEMINI_RATE_LIMIT_WINDOW_MS` | no | `60000` | Gemini throttle window, ms |
-| `REQUEST_CREATE_MAX_ATTEMPTS_PER_USER` | no | `20` | `POST /requests` throttle, per customer |
-| `REQUEST_CREATE_WINDOW_MS` | no | `3600000` | `POST /requests` throttle window, ms (1 hour) |
-| `DEMO_SEED_DATABASE` | seed only | — | must equal the connected database name for `pnpm seed:demo` |
-| `DEMO_SEED_PASSWORD` | seed only | — | password for every demo account, >= 12 chars |
-
-Startup fails fast with a clear error message if required variables are
-missing or invalid (see `src/config/env.ts`). See
-[docs/api.md](docs/api.md) for the full authentication design.
-
-## Running locally
-
-```bash
-cd apps/api
-pnpm dev          # tsx watch, loads .env via --env-file
-```
-
-The health check does not require a database connection:
+Check it's up:
 
 ```bash
 curl http://localhost:3000/api/v1/health
 # {"data":{"status":"ok"}}
 ```
 
-Every other route connects to the database before handling requests, using
-a single cached connection (see `src/db/connect.ts`) rather than one
-connection per request — important on MongoDB Atlas's free M0 tier, which
-enforces low connection limits.
+### Environment variables
 
-## Scripts
+The app refuses to start if a required variable is missing or invalid. The
+full list with comments is in [`apps/api/.env.example`](apps/api/.env.example).
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `MONGODB_URI` | yes | MongoDB connection string |
+| `JWT_ACCESS_SECRET` | yes | Signs access tokens, 32+ characters |
+| `PORT` | no | Defaults to `3000` |
+| `DEMO_COMPANY_ID` | for sign-up | The company new customers join. Registration returns `503` until it's set. |
+| `GEMINI_API_KEY` | for AI | Without it, everything else still works and requests are triaged by hand. |
+| `AUTH_ALLOWED_ORIGINS` | in production | Comma-separated frontend URLs allowed to make signed-in requests |
+| `AUTH_COOKIE_SECURE`, `AUTH_COOKIE_SAME_SITE` | no | Cookie flags. `Secure` is on by default in production. |
+| `AUTH_*`, `REQUEST_CREATE_*`, `GEMINI_*` limits | no | Rate-limit and timeout tuning, with safe defaults |
+| `DEMO_SEED_DATABASE`, `DEMO_SEED_PASSWORD` | seed only | Guards for the demo seed script |
+
+### Scripts
 
 Run from `apps/api/`:
 
-- `pnpm dev` — start the dev server with hot reload
-- `pnpm build` — compile TypeScript to `dist/`
-- `pnpm typecheck` — type-check `src/` and `tests/`
-- `pnpm test` — run the vitest suite (spins up an in-memory MongoDB
-  **replica set** via `mongodb-memory-server`, required for the real
-  multi-document transaction `POST /requests` uses; no real database or
-  `.env` needed)
-- `pnpm start` — run the compiled build (`dist/server.js`)
-- `pnpm seed:demo [--reset]` — seed (or wipe and re-seed) the synthetic demo
-  company; guarded, see [docs/demo.md](docs/demo.md)
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | Dev server with hot reload |
+| `npm run build` | Compile to `dist/` |
+| `npm start` | Run the compiled build |
+| `npm run typecheck` | Type-check source and tests |
+| `npm test` | Run the test suite against an in-memory MongoDB replica set (no `.env` needed) |
+| `npm run seed:demo [-- --reset]` | Create, or wipe and recreate, the demo company |
 
-## Notes
+### Demo data
 
-- Cookie-based session authentication (FS02) is implemented — see
-  [docs/api.md](docs/api.md) for the full design (JWT/session split,
-  refresh rotation, reuse detection, CSRF, throttling).
-- Public customer registration (FS04, `POST /auth/register`) is
-  implemented — see [docs/api.md](docs/api.md). It creates a `CUSTOMER`
-  user only, with no session/tokens; the user logs in separately
-  afterwards. Requires `DEMO_COMPANY_ID` to be set to a real Company's
-  `_id` or it fails safely with 503.
-- `GET /api/v1/auth/me` (FS05) restores the authenticated user after a
-  browser refresh, purely from cookies.
-- Gemini device analysis (FS14, `analyzeDevices()` in
-  `src/modules/ai/`) is implemented as an internal service, not an HTTP
-  endpoint — see [docs/api.md](docs/api.md) "AI device analysis (FS14)".
-- `POST /api/v1/requests` (FS15) — customer-only, idempotent, multi-device
-  service request creation, calling FS14 before persisting — see
-  [docs/api.md](docs/api.md) "Service requests (FS15)". Photo attachments
-  (FS12/FS13) were cancelled for the MVP; there is no `photoIds` field.
-- Admin visit scheduling (FS18) - see [docs/api.md](docs/api.md) "Visit
-  scheduling (FS18)". FS09/FS17 do not exist in this repo, so it adds only
-  what it needs (`Company.timezone`, visit models) and documents its assumptions.
-- Technician visit read access (FS19, `GET /technician/visits[/:id]`) - see
-  [docs/api.md](docs/api.md). Photos/evidence are out of scope (FS13 was cancelled
-  for the MVP).
-- On-site work agreement (FS22) is **deprecated** — see [docs/api.md](docs/api.md)
-  "On-site work agreement (FS22)". Its routes remain mounted for backward
-  compatibility but have no effect on FS23 or FS25. The decision workflow it
-  pioneered (`PROPOSED` -> `APPROVED`/`REJECTED`, one-way, immutable once
-  decided) now lives directly on FS11's `DeviceParts` (below), which is
-  catalog-backed and already wired into stock and invoicing.
-- Device part proposals and decisions (FS11,
-  `PUT /technician/visits/:visitId/devices/:deviceId/parts`,
-  `POST /technician/visits/:visitId/devices/:deviceId/parts/decisions`,
-  `GET /technician/visits/:visitId/parts`) - see [docs/api.md](docs/api.md)
-  "Device part proposals and decisions". Each proposal has its own stable
-  `proposalId` (never just the catalog `partId`, since the same part can be
-  re-proposed after a rejection); a client can never submit a decision
-  directly; a decided proposal is immutable. Legacy proposals from before this
-  decision field existed (no `decision` at all) remain billable/editable
-  exactly as before — a permanent compatibility fallback, not a migration step.
-- Technician work execution (FS23, `POST /technician/visits/:id/start`,
-  `POST /technician/visits/:id/complete`,
-  `PUT /technician/visits/:visitId/work-results/:deviceId`,
-  `GET /technician/visits/:visitId/work-results`) - see [docs/api.md](docs/api.md).
-  Recording `REPAIRED`/`FAILED` is gated by FS11 `DeviceParts` decisions wherever
-  any exist for a device (`409 WORK_NOT_APPROVED` otherwise); a device with no
-  decision-tracked proposals falls back to the original interim boundary
-  (`Visit.deviceIds`, the admin-assigned scope from FS18) — a permanent
-  compatibility fallback for legacy data, not full enforcement. Visit
-  completion still requires every device in `Visit.deviceIds` to have a result.
-  Payment, invoicing, and reassignment endpoints remain out of scope for FS23
-  itself.
-- Billing (FS10 company settings/labor fee, FS11 parts catalog with stock and
-  approval decisions, FS25 invoices) — see [docs/api.md](docs/api.md). FS11
-  deliberately tracks stock counts (a product decision that departs from the
-  ticket's availability flag); issuing an invoice decrements stock. Billing is
-  computed from `DeviceParts` + `WorkResult`: a `REPAIRED` device's parts are
-  only billed when their own proposal is `APPROVED` — a `PROPOSED`/`REJECTED`
-  proposal on that device is never billed, even when another proposal on the
-  same device is approved. Payments (FS26) and the customer invoice view
-  (FS27) are not implemented.
-- Synthetic demo data (FS34, `pnpm seed:demo`) — see [docs/demo.md](docs/demo.md).
-- Technician accounts (FS09): admins create them and get a one-time activation
-  token to share (there is no email service yet, FS07); the technician sets their
-  own password via `POST /auth/activate-technician`. Admin request triage (FS17) is
-  read-only — see [docs/api.md](docs/api.md).
-- There is no lint tooling configured in this repository yet (no ESLint
-  config/script exists) — setting one up is out of scope for FS02/FS04/FS14/FS15/FS18/FS22/FS23.
-- Logs never include secrets, tokens, cookies, or raw request bodies.
+`npm run seed:demo` creates a synthetic company with an admin, two technicians,
+two customers, a parts catalog and jobs at every stage: completed and invoiced,
+in progress, scheduled and unscheduled. It refuses to run in production or
+against the wrong database. See [docs/demo.md](docs/demo.md) for the accounts and
+a suggested walkthrough.
+
+---
+
+## API
+
+All routes are under `/api/v1` and share one response envelope, pagination
+style and error format. The full reference is in [docs/api.md](docs/api.md).
+
+| Area | Examples |
+| --- | --- |
+| Auth | `POST /auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `GET /auth/me`, `POST /auth/activate-technician` |
+| Customer | `POST /requests`, `GET /requests`, `GET /requests/:id`, `GET /requests/:id/timeline` |
+| Admin | `GET /admin/requests`, `POST /admin/requests/:id/visits`, `/admin/technicians`, `/admin/parts`, `/admin/company-settings` |
+| Technician | `GET /technician/visits`, `POST /technician/visits/:id/start` and `/complete`, part proposals and decisions, work results, `invoice-preview`, `invoice` |
+| Catalog | `GET /catalog/parts`, `GET /catalog/pricing` |
+
+---
+
+## Not in this version
+
+These are planned but not built yet: photo uploads, service reports, recording
+payments, rescheduling and cancelling visits, and email (technician invites are
+shared as a link). The early on-site "work agreement" endpoints are deprecated
+and replaced by per-part approval.
